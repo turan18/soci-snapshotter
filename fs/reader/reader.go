@@ -48,7 +48,8 @@ import (
 	"time"
 
 	"github.com/awslabs/soci-snapshotter/cache"
-	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	cm "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager/monitor"
 	spanmanager "github.com/awslabs/soci-snapshotter/fs/span-manager"
 	"github.com/awslabs/soci-snapshotter/metadata"
 	"github.com/awslabs/soci-snapshotter/util/ioutils"
@@ -125,22 +126,23 @@ func (vr *VerifiableReader) isClosed() bool {
 }
 
 // NewReader creates a Reader based on the given soci blob and Span Manager.
-func NewReader(r metadata.Reader, layerSha digest.Digest, spanManager *spanmanager.SpanManager, disableVerification bool) (*VerifiableReader, error) {
+func NewReader(r metadata.Reader, layerSha digest.Digest, spanManager *spanmanager.SpanManager, disableVerification bool, layerMonitor monitor.Monitor) (*VerifiableReader, error) {
 	vr := &reader{
 		spanManager:         spanManager,
 		r:                   r,
 		layerSha:            layerSha,
 		verifier:            digestVerifier,
 		disableVerification: disableVerification,
+		layerMonitor:        layerMonitor,
 	}
 	return &VerifiableReader{r: vr, verifier: digestVerifier}, nil
 }
 
 type reader struct {
-	spanManager *spanmanager.SpanManager
-	r           metadata.Reader
-	layerSha    digest.Digest
-
+	spanManager    *spanmanager.SpanManager
+	r              metadata.Reader
+	layerSha       digest.Digest
+	layerMonitor   monitor.Monitor
 	lastReadTime   time.Time
 	lastReadTimeMu sync.Mutex
 
@@ -240,16 +242,18 @@ func (sf *file) ReadAt(p []byte, offset int64) (int, error) {
 	defer r.Close()
 
 	// TODO this is not the right place for this metric to be. It needs to go down the BlobReader, when the HTTP request is issued
-	commonmetrics.IncOperationCount(commonmetrics.SynchronousReadRegistryFetchCount, sf.gr.layerSha) // increment the number of on demand file fetches from remote registry
+	if sf.gr.layerMonitor != nil {
+		sf.gr.layerMonitor.Inc(cm.SynchronousReadRegistryFetchCount) // increment the number of on demand file fetches from remote registry
+	}
 	sf.gr.setLastReadTime(time.Now())
 
 	n, err := io.ReadFull(r, p[0:expectedSize])
 	if err != nil {
 		return 0, fmt.Errorf("unexpected copied data size for on-demand fetch. read = %d, expected = %d", n, expectedSize)
 	}
-
-	commonmetrics.AddBytesCount(commonmetrics.SynchronousBytesServed, sf.gr.layerSha, int64(n)) // measure the number of bytes served synchronously
-
+	if sf.gr.layerMonitor != nil {
+		sf.gr.layerMonitor.Add(cm.SynchronousBytesServed, int64(n)) // measure the number of bytes served synchronously
+	}
 	return n, nil
 }
 

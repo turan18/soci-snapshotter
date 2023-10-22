@@ -42,7 +42,8 @@ import (
 	"strings"
 	"syscall"
 
-	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	cm "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager"
 	"github.com/awslabs/soci-snapshotter/fs/source"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/mount"
@@ -53,7 +54,6 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
 	"github.com/moby/sys/mountinfo"
-	"github.com/opencontainers/go-digest"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -320,7 +320,8 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		}
 		log.G(lCtx).WithField(remoteSnapshotLogKey, prepareFailed).WithError(err).Warn("failed to prepare remote snapshot")
 		if !errors.Is(err, ErrNoZtoc) {
-			commonmetrics.IncOperationCount(commonmetrics.FuseMountFailureCount, digest.Digest(""))
+			globalMonitor, _ := manager.G().Root()
+			globalMonitor.Inc(cm.FuseMountFailureCount)
 		}
 	}
 

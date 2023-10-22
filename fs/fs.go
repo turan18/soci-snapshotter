@@ -56,6 +56,8 @@ import (
 	"github.com/awslabs/soci-snapshotter/fs/layer"
 	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
 	layermetrics "github.com/awslabs/soci-snapshotter/fs/metrics/layer"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager/monitor"
 	"github.com/awslabs/soci-snapshotter/fs/remote"
 	"github.com/awslabs/soci-snapshotter/fs/source"
 	"github.com/awslabs/soci-snapshotter/metadata"
@@ -218,10 +220,9 @@ type sociContext struct {
 	fetchOnce            sync.Once
 	sociIndex            *soci.Index
 	imageLayerToSociDesc map[string]ocispec.Descriptor
-	fuseOperationCounter *layer.FuseOperationCounter
 }
 
-func (c *sociContext) Init(fsCtx context.Context, ctx context.Context, imageRef, indexDigest, imageManifestDigest string, store store.Store, fuseOpEmitWaitDuration time.Duration, httpConfig config.RetryableHTTPClientConfig) error {
+func (c *sociContext) Init(fsCtx context.Context, ctx context.Context, imageRef, indexDigest, imageManifestDigest string, store store.Store, imOpts []monitor.ImageMonitorOpt, httpConfig config.RetryableHTTPClientConfig) error {
 	var retErr error
 	c.fetchOnce.Do(func() {
 		defer func() {
@@ -274,10 +275,16 @@ func (c *sociContext) Init(fsCtx context.Context, ctx context.Context, imageRef,
 		c.sociIndex = index
 		c.populateImageLayerToSociMapping(index)
 
-		// Create the FUSE operation counter.
-		// Metrics are emitted after a wait time of fuseOpEmitWaitDuration.
-		c.fuseOperationCounter = layer.NewFuseOperationCounter(digest.Digest(imageManifestDigest), fuseOpEmitWaitDuration)
-		go c.fuseOperationCounter.Run(fsCtx)
+		// Create a new image observability manager for image with ref
+		// and register it with the global observability manager.
+		imageManger := manager.NewImageManager()
+		manager.G().AddManager(imageRef, imageManger)
+		// Create a new image monitor and register it as the root monitor
+		// for the new image manager.
+		imageMonitor := monitor.NewImageMonitor(digest.Digest(imageManifestDigest), imOpts...)
+		imageManger.RegisterRoot(imageMonitor)
+		go imageMonitor.Listen(fsCtx)
+
 	})
 	c.cachedErrMu.RLock()
 	retErr = c.cachedErr
@@ -357,7 +364,8 @@ func (fs *filesystem) getSociContext(ctx context.Context, imageRef, indexDigest,
 	if !ok {
 		return nil, fmt.Errorf("could not load index: fs soci context is invalid type for %s", indexDigest)
 	}
-	err := c.Init(fs.ctx, ctx, imageRef, indexDigest, imageManifestDigest, fs.contentStore, fs.fuseMetricsEmitWaitDuration, fs.httpConfig)
+	imageMonitorOpts := []monitor.ImageMonitorOpt{monitor.WithWaitPeriod(fs.fuseMetricsEmitWaitDuration)}
+	err := c.Init(fs.ctx, ctx, imageRef, indexDigest, imageManifestDigest, fs.contentStore, imageMonitorOpts, fs.httpConfig)
 	return c, err
 }
 
@@ -390,6 +398,11 @@ func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[s
 	} else if len(src) == 0 {
 		return fmt.Errorf("source must be passed")
 	}
+	// Get the image observability manager by imageRef.
+	imageManager, err := manager.G().GetManager(imageRef)
+	if err != nil {
+		return err
+	}
 
 	// Resolve the target layer
 	var (
@@ -408,8 +421,8 @@ func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[s
 				rErr = fmt.Errorf("skipping mounting layer %s as FUSE mount: %w", s.Target.Digest.String(), snapshot.ErrNoZtoc)
 				break
 			}
-
-			l, err := fs.resolver.Resolve(ctx, s.Hosts, s.Name, s.Target, sociDesc, c.fuseOperationCounter, fs.disableVerification)
+			imageManager.Register(string(s.Target.Digest), monitor.NewLayerMonitor(s.Target.Digest))
+			l, err := fs.resolver.Resolve(ctx, s.Hosts, s.Name, s.Target, sociDesc, fs.disableVerification)
 			if err == nil {
 				resultChan <- l
 				return
@@ -431,8 +444,8 @@ func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[s
 				log.G(ctx).WithError(snapshot.ErrNoZtoc).WithField("layerDigest", desc.Digest.String()).Debug("skipping layer pre-resolve")
 				return
 			}
-
-			l, err := fs.resolver.Resolve(ctx, preResolve.Hosts, preResolve.Name, desc, sociDesc, c.fuseOperationCounter, fs.disableVerification)
+			imageManager.Register(string(desc.Digest), monitor.NewLayerMonitor(desc.Digest))
+			l, err := fs.resolver.Resolve(ctx, preResolve.Hosts, preResolve.Name, desc, sociDesc, fs.disableVerification)
 			if err != nil {
 				log.G(ctx).WithError(err).Debug("failed to pre-resolve")
 				return
@@ -479,7 +492,12 @@ func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[s
 
 	// Measuring duration of Mount operation for resolved layer.
 	digest := l.Info().Digest // get layer sha
-	defer commonmetrics.MeasureLatencyInMilliseconds(commonmetrics.Mount, digest, start)
+
+	layerMonitor, err := imageManager.Get(string(digest))
+	if err != nil {
+		return err
+	}
+	defer layerMonitor.Measure(commonmetrics.Mount, start, monitor.Milli)
 
 	// Register the mountpoint layer
 	fs.layerMu.Lock()

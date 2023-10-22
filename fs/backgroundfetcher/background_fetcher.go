@@ -22,6 +22,7 @@ import (
 	"time"
 
 	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager"
 	"github.com/containerd/log"
 	"golang.org/x/time/rate"
 )
@@ -192,7 +193,8 @@ func (bf *BackgroundFetcher) emitWorkQueueMetric(ctx context.Context, ticker *ti
 			return
 		case <-ticker.C:
 			// background fetcher is at the snapshotter's fs level, so no image digest as key
-			commonmetrics.AddImageOperationCount(commonmetrics.BackgroundFetchWorkQueueSize, "", int32(len(bf.workQueue)))
+			globalMonitor, _ := manager.G().Root()
+			globalMonitor.Add(commonmetrics.BackgroundFetchWorkQueueSize, int64(len(bf.workQueue)))
 		}
 	}
 }

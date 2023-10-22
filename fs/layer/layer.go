@@ -52,7 +52,9 @@ import (
 	"github.com/awslabs/soci-snapshotter/config"
 
 	backgroundfetcher "github.com/awslabs/soci-snapshotter/fs/backgroundfetcher"
-	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	cm "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager/monitor"
 	"github.com/awslabs/soci-snapshotter/fs/reader"
 	"github.com/awslabs/soci-snapshotter/fs/remote"
 
@@ -230,7 +232,7 @@ func newCache(root string, cacheType string, cfg config.FSConfig) (cache.BlobCac
 }
 
 // Resolve resolves a layer based on the passed layer blob information.
-func (r *Resolver) Resolve(ctx context.Context, hosts source.RegistryHosts, refspec reference.Spec, desc, sociDesc ocispec.Descriptor, opCounter *FuseOperationCounter, disableVerification bool, metadataOpts ...metadata.Option) (_ Layer, retErr error) {
+func (r *Resolver) Resolve(ctx context.Context, hosts source.RegistryHosts, refspec reference.Spec, desc, sociDesc ocispec.Descriptor, disableVerification bool, metadataOpts ...metadata.Option) (_ Layer, retErr error) {
 	name := refspec.String() + "/" + desc.Digest.String()
 
 	// Wait if resolving this layer is already running. The result
@@ -317,10 +319,19 @@ func (r *Resolver) Resolve(ctx context.Context, hosts source.RegistryHosts, refs
 	sr := io.NewSectionReader(readerAtFunc(func(p []byte, offset int64) (n int, err error) {
 		return blobR.ReadAt(p, offset)
 	}), 0, blobR.Size())
+
+	imageManager, err := manager.G().GetManager(refspec.String())
+	if err != nil {
+		return nil, err
+	}
+	layerMonitor, err := imageManager.Get(string(desc.Digest))
+	if err != nil {
+		return nil, err
+	}
 	// define telemetry hooks to measure latency metrics for the metadata store
 	telemetry := metadata.Telemetry{
 		InitMetadataStoreLatency: func(start time.Time) {
-			commonmetrics.MeasureLatencyInMilliseconds(commonmetrics.InitMetadataStore, desc.Digest, start)
+			layerMonitor.Measure(cm.InitMetadataStore, start, monitor.Milli)
 		},
 	}
 	meta, err := r.metadataStore(sr, ztoc.TOC, append(metadataOpts, metadata.WithTelemetry(&telemetry))...)
@@ -332,16 +343,16 @@ func (r *Resolver) Resolve(ctx context.Context, hosts source.RegistryHosts, refs
 	spanManager := spanmanager.New(ztoc, sr, spanCache, r.config.BlobConfig.MaxSpanVerificationRetries, cache.Direct())
 	var bgLayerResolver backgroundfetcher.Resolver
 	if r.bgFetcher != nil {
-		bgLayerResolver = backgroundfetcher.NewSequentialResolver(desc.Digest, spanManager)
+		bgLayerResolver = backgroundfetcher.NewSequentialResolver(desc.Digest, spanManager, layerMonitor)
 		r.bgFetcher.Add(bgLayerResolver)
 	}
-	vr, err := reader.NewReader(meta, desc.Digest, spanManager, disableVerification)
+	vr, err := reader.NewReader(meta, desc.Digest, spanManager, disableVerification, layerMonitor)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read layer: %w", err)
 	}
 
 	// Combine layer information together and cache it.
-	l := newLayer(r, desc, blobR, vr, bgLayerResolver, opCounter)
+	l := newLayer(r, desc, blobR, vr, bgLayerResolver, imageManager)
 	r.layerCacheMu.Lock()
 	cachedL, done2, added := r.layerCache.Add(name, l)
 	r.layerCacheMu.Unlock()
@@ -402,15 +413,14 @@ func newLayer(
 	blob *blobRef,
 	vr *reader.VerifiableReader,
 	bgResolver backgroundfetcher.Resolver,
-	opCounter *FuseOperationCounter,
-) *layer {
+	imageManager manager.Manager) *layer {
 	return &layer{
-		resolver:             resolver,
-		desc:                 desc,
-		blob:                 blob,
-		verifiableReader:     vr,
-		bgResolver:           bgResolver,
-		fuseOperationCounter: opCounter,
+		resolver:         resolver,
+		desc:             desc,
+		blob:             blob,
+		verifiableReader: vr,
+		bgResolver:       bgResolver,
+		imageManager:     imageManager,
 	}
 }
 
@@ -419,12 +429,10 @@ type layer struct {
 	desc             ocispec.Descriptor
 	blob             *blobRef
 	verifiableReader *reader.VerifiableReader
-
-	bgResolver backgroundfetcher.Resolver
+	imageManager     manager.Manager
+	bgResolver       backgroundfetcher.Resolver
 
 	r reader.Reader
-
-	fuseOperationCounter *FuseOperationCounter
 
 	closed   bool
 	closedMu sync.Mutex
@@ -487,7 +495,7 @@ func (l *layer) RootNode(baseInode uint32) (fusefs.InodeEmbedder, error) {
 	if l.r == nil {
 		return nil, fmt.Errorf("layer hasn't been verified yet")
 	}
-	return newNode(l.desc.Digest, l.r, l.blob, baseInode, l.resolver.overlayOpaqueType, l.resolver.config.LogFuseOperations, l.fuseOperationCounter)
+	return newNode(l.desc.Digest, l.r, l.blob, baseInode, l.resolver.overlayOpaqueType, l.resolver.config.LogFuseOperations, l.imageManager)
 }
 
 func (l *layer) ReadAt(p []byte, offset int64, opts ...remote.Option) (int, error) {

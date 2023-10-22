@@ -24,6 +24,7 @@ import (
 	"time"
 
 	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager/monitor"
 	sm "github.com/awslabs/soci-snapshotter/fs/span-manager"
 	"github.com/awslabs/soci-snapshotter/ztoc/compression"
 	"github.com/containerd/log"
@@ -46,6 +47,7 @@ type Resolver interface {
 type base struct {
 	*sm.SpanManager
 	layerDigest digest.Digest
+	lm          monitor.Monitor
 	closed      bool
 	closedMu    sync.Mutex
 	// timestamp when background fetch for the layer starts
@@ -71,11 +73,12 @@ type sequentialLayerResolver struct {
 	nextSpanFetchID compression.SpanID
 }
 
-func NewSequentialResolver(layerDigest digest.Digest, spanManager *sm.SpanManager) Resolver {
+func NewSequentialResolver(layerDigest digest.Digest, spanManager *sm.SpanManager, lm monitor.Monitor) Resolver {
 	return &sequentialLayerResolver{
 		base: &base{
 			SpanManager: spanManager,
 			layerDigest: layerDigest,
+			lm:          lm,
 		},
 	}
 }
@@ -91,16 +94,15 @@ func (lr *sequentialLayerResolver) Resolve(ctx context.Context) (bool, error) {
 	}
 	err := lr.FetchSingleSpan(lr.nextSpanFetchID)
 	if err == nil {
-		commonmetrics.IncOperationCount(commonmetrics.BackgroundSpanFetchCount, lr.layerDigest)
+		lr.lm.Inc(commonmetrics.BackgroundSpanFetchCount)
 		lr.nextSpanFetchID++
 		return true, nil
 	}
 	if errors.Is(err, sm.ErrExceedMaxSpan) {
-		commonmetrics.MeasureLatencyInMilliseconds(commonmetrics.BackgroundFetch, lr.layerDigest, lr.base.start)
+		lr.lm.Measure(commonmetrics.BackgroundFetch, lr.base.start, monitor.Milli)
 		return false, nil
 	}
-
-	commonmetrics.IncOperationCount(commonmetrics.BackgroundSpanFetchFailureCount, lr.layerDigest)
+	lr.lm.Inc(commonmetrics.BackgroundSpanFetchFailureCount)
 	return false, fmt.Errorf("error trying to fetch span with spanId = %d from layerDigest = %s: %w",
 		lr.nextSpanFetchID, lr.layerDigest.String(), err)
 }

@@ -53,6 +53,8 @@ import (
 	"time"
 
 	"github.com/awslabs/soci-snapshotter/cache"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager/monitor"
 	"github.com/awslabs/soci-snapshotter/fs/reader"
 	"github.com/awslabs/soci-snapshotter/fs/remote"
 	"github.com/awslabs/soci-snapshotter/fs/source"
@@ -168,7 +170,7 @@ func makeNodeReader(t *testing.T, contents []byte, spanSize int64, factory metad
 		t.Fatalf("failed to create reader: %v", err)
 	}
 	spanManager := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
-	vr, err := reader.NewReader(mr, digest.FromString(""), spanManager, false)
+	vr, err := reader.NewReader(mr, digest.FromString(""), spanManager, false, nil)
 	if err != nil {
 		mr.Close()
 		t.Fatalf("failed to make new reader: %v", err)
@@ -330,7 +332,7 @@ func testExistenceWithOpaque(t *testing.T, factory metadata.Store, opaque Overla
 				}
 				defer mr.Close()
 				spanManager := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
-				vr, err := reader.NewReader(mr, digest.FromString(""), spanManager, false)
+				vr, err := reader.NewReader(mr, digest.FromString(""), spanManager, false, nil)
 				if err != nil {
 					t.Fatalf("failed to make new reader: %v", err)
 				}
@@ -362,7 +364,10 @@ func hasSize(name string, size int) check {
 }
 
 func getRootNode(t *testing.T, r reader.Reader, opaque OverlayOpaqueType) *node {
-	rootNode, err := newNode(testStateLayerDigest, &testReader{r}, &testBlobState{10, 5}, 100, opaque, false, nil)
+	im := manager.NewImageManager()
+	im.RegisterRoot(monitor.NewImageMonitor(digest.Digest("")))
+	im.Register(string(testStateLayerDigest), monitor.NewLayerMonitor(testStateLayerDigest))
+	rootNode, err := newNode(testStateLayerDigest, &testReader{r}, &testBlobState{10, 5}, 100, opaque, false, im)
 	if err != nil {
 		t.Fatalf("failed to get root node: %v", err)
 	}

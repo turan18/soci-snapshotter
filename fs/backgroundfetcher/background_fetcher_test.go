@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/awslabs/soci-snapshotter/cache"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager/monitor"
 	spanmanager "github.com/awslabs/soci-snapshotter/fs/span-manager"
 	"github.com/awslabs/soci-snapshotter/util/testutil"
 	"github.com/awslabs/soci-snapshotter/ztoc"
@@ -125,7 +126,7 @@ func TestBackgroundFetcherRun(t *testing.T) {
 			defer bf.Close()
 
 			for _, info := range infos {
-				bf.Add(NewSequentialResolver(digest.FromString("test"), info.sm))
+				bf.Add(NewSequentialResolver(digest.FromString("test"), info.sm, monitor.NewLayerMonitor(digest.FromString("test"))))
 			}
 
 			time.Sleep(tc.waitTime)

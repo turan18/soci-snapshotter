@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/awslabs/soci-snapshotter/cache"
+	"github.com/awslabs/soci-snapshotter/fs/metrics/manager/monitor"
 	spanmanager "github.com/awslabs/soci-snapshotter/fs/span-manager"
 	"github.com/awslabs/soci-snapshotter/util/testutil"
 	"github.com/awslabs/soci-snapshotter/ztoc"
@@ -48,7 +49,7 @@ func TestSequentialResolver(t *testing.T) {
 				t.Fatalf("error build ztoc and section reader: %v", err)
 			}
 			sm := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
-			sequentialResolver := NewSequentialResolver(digest.FromString("test"), sm)
+			sequentialResolver := NewSequentialResolver(digest.FromString("test"), sm, monitor.NewLayerMonitor(digest.FromString("test")))
 
 			var resolvedSpans []int
 			for {
