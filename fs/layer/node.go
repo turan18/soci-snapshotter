@@ -176,6 +176,8 @@ func (fs *fs) basicTelemetry(ctx context.Context, operationName string, path str
 
 // reportTelemetry wraps FUSE failure telemetry operations.
 func (fs *fs) reportTelemetry(operationName string, stateError error) {
+	gb, _ := manager.G().Root()
+	gb.Report(cm.FuseFailureState)
 	fs.layerMonitor.Report(operationName)
 	fs.s.report(stateError)
 }
