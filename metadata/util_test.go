@@ -48,7 +48,7 @@ import (
 	"github.com/awslabs/soci-snapshotter/ztoc"
 )
 
-var allowedPrefix = [4]string{"", "./", "/", "../"}
+var allowedPrefix = [1]string{""}
 
 var srcCompressions = map[string]int{
 	"gzip-nocompression":      gzip.NoCompression,
@@ -159,7 +159,7 @@ func testReader(t *testing.T, factory readerFactory) {
 			name: "various files",
 			in: []testutil.TarEntry{
 				testutil.Dir("bar/"),
-				testutil.File("bar/../bar///////////////////foo", ""),
+				testutil.File("bar/foo", ""),
 				testutil.Chardev("bar/cdev", 10, 11),
 				testutil.Blockdev("bar/bdev", 100, 101),
 				testutil.Fifo("bar/fifo"),

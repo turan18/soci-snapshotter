@@ -75,7 +75,8 @@ import (
 var (
 	bucketKeyFilesystems = []byte("filesystems")
 
-	bucketKeyNodes       = []byte("nodes")
+	bucketKeyNodes = []byte("nodes")
+
 	bucketKeySize        = []byte("size")
 	bucketKeyModTime     = []byte("modtime")
 	bucketKeyLinkName    = []byte("linkName")
@@ -89,11 +90,11 @@ var (
 	bucketKeyXattrsExtra = []byte("xattrsExtra")
 	bucketKeyNumLink     = []byte("numLink")
 
-	bucketKeyMetadata      = []byte("metadata")
-	bucketKeyChildName     = []byte("childName")
-	bucketKeyChildID       = []byte("childID")
-	bucketKeyChildrenExtra = []byte("childrenExtra")
+	bucketKeyMetadata = []byte("metadata")
 
+	bucketKeyChildName          = []byte("childName")
+	bucketKeyChildID            = []byte("childID")
+	bucketKeyChildrenExtra      = []byte("childrenExtra")
 	bucketKeyName               = []byte("name")
 	bucketKeyUncompressedOffset = []byte("uncompressedOffset")
 	bucketKeyTarHeaderOffset    = []byte("tarHeaderOffset")

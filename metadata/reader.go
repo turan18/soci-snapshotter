@@ -40,10 +40,8 @@ import (
 	"io"
 	"math"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -188,10 +186,14 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 		for _, ent := range toc.FileMetadata {
 			var id uint32
 			var b *bolt.Bucket
-			ent.Name = cleanEntryName(ent.Name)
+
+			// TAR stores trailing "/" for directory entries.
+			name := filepath.Clean(ent.Name)
+			linkName := filepath.Clean(ent.Linkname)
+
 			isLink := ent.Type == "hardlink"
 			if isLink {
-				id, err = getIDByName(md, ent.Linkname, r.rootID)
+				id, err = getIDByName(md, linkName, r.rootID)
 				if err != nil {
 					return fmt.Errorf("%q is a hardlink but cannot get link destination %q: %w", ent.Name, ent.Linkname, err)
 				}
@@ -208,7 +210,7 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 				var found bool
 				if ent.Type == "dir" {
 					// Check if this directory is already created, if so overwrite it.
-					id, err = getIDByName(md, ent.Name, r.rootID)
+					id, err = getIDByName(md, name, r.rootID)
 					if err == nil {
 						b, err = getNodeBucketByID(nodes, id)
 						if err != nil {
@@ -238,12 +240,12 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 				}
 			}
 
-			pdirName := parentDir(ent.Name)
+			pdirName := parentDir(name)
 			pid, pb, err := r.getOrCreateDir(nodes, md, pdirName, r.rootID)
 			if err != nil {
 				return fmt.Errorf("failed to create parent directory %q of %q: %w", pdirName, ent.Name, err)
 			}
-			if err := setChild(md, pb, pid, path.Base(ent.Name), id, ent.Type == "dir"); err != nil {
+			if err := setChild(md, pb, pid, filepath.Base(name), id, ent.Type == "dir"); err != nil {
 				return err
 			}
 
@@ -299,6 +301,33 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 	return nil
 }
 
+func getIDByName(md map[uint32]*metadataEntry, path string, rootID uint32) (uint32, error) {
+	if path == "" {
+		return rootID, nil
+	}
+	parentDir, base := filepath.Split(filepath.Clean(path))
+	pid, err := getIDByName(md, parentDir, rootID)
+	if err != nil {
+		return 0, err
+	}
+	if md[pid] == nil {
+		return 0, fmt.Errorf("not found metadata of %d", pid)
+	}
+	if md[pid].children == nil {
+		return 0, fmt.Errorf("not found children of %q", pid)
+	}
+	c, ok := md[pid].children[base]
+	if !ok {
+		return 0, fmt.Errorf("not found child %q in %d", base, pid)
+	}
+	return c.id, nil
+}
+
+func parentDir(path string) string {
+	dir, _ := filepath.Split(path)
+	return dir
+}
+
 func (r *reader) getOrCreateDir(nodes *bolt.Bucket, md map[uint32]*metadataEntry, d string, rootID uint32) (id uint32, b *bolt.Bucket, err error) {
 	id, err = getIDByName(md, d, rootID)
 	if err != nil {
@@ -322,7 +351,7 @@ func (r *reader) getOrCreateDir(nodes *bolt.Bucket, md map[uint32]*metadataEntry
 			if err != nil {
 				return 0, nil, err
 			}
-			if err := setChild(md, pb, pid, path.Base(d), id, true); err != nil {
+			if err := setChild(md, pb, pid, filepath.Base(d), id, true); err != nil {
 				return 0, nil, err
 			}
 		}
@@ -333,6 +362,40 @@ func (r *reader) getOrCreateDir(nodes *bolt.Bucket, md map[uint32]*metadataEntry
 		}
 	}
 	return id, b, nil
+}
+
+func setChild(md map[uint32]*metadataEntry, pb *bolt.Bucket, pid uint32, base string, id uint32, isDir bool) error {
+	if md[pid] == nil {
+		md[pid] = &metadataEntry{}
+	}
+	if md[pid].children == nil {
+		md[pid].children = make(map[string]childEntry)
+	}
+	md[pid].children[base] = childEntry{base, id}
+	if isDir {
+		numLink, _ := binary.Varint(pb.Get(bucketKeyNumLink))
+		if err := putInt(pb, bucketKeyNumLink, numLink+1); err != nil {
+			return fmt.Errorf("cannot add numlink for children: %w", err)
+		}
+	}
+	return nil
+}
+
+func attrFromZtocEntry(src *ztoc.FileMetadata, dst *Attr) *Attr {
+	dst.Size = int64(src.UncompressedSize)
+	dst.ModTime = src.ModTime
+	dst.LinkName = src.Linkname
+	dst.Mode = src.FileMode()
+	dst.UID = src.UID
+	dst.GID = src.GID
+	dst.DevMajor = int(src.Devmajor)
+	dst.DevMinor = int(src.Devminor)
+	xattrs := make(map[string][]byte)
+	for k, v := range src.Xattrs() {
+		xattrs[k] = []byte(v)
+	}
+	dst.Xattrs = xattrs
+	return dst
 }
 
 func (r *reader) waitInit() error {
@@ -563,73 +626,6 @@ func (fr *file) TarHeaderOffset() compression.Offset {
 
 func (fr *file) TarHeaderSize() compression.Offset {
 	return fr.tarHeaderSize
-}
-
-func attrFromZtocEntry(src *ztoc.FileMetadata, dst *Attr) *Attr {
-	dst.Size = int64(src.UncompressedSize)
-	dst.ModTime = src.ModTime
-	dst.LinkName = src.Linkname
-	dst.Mode = src.FileMode()
-	dst.UID = src.UID
-	dst.GID = src.GID
-	dst.DevMajor = int(src.Devmajor)
-	dst.DevMinor = int(src.Devminor)
-	xattrs := make(map[string][]byte)
-	for k, v := range src.Xattrs() {
-		xattrs[k] = []byte(v)
-	}
-	dst.Xattrs = xattrs
-	return dst
-}
-
-func getIDByName(md map[uint32]*metadataEntry, name string, rootID uint32) (uint32, error) {
-	name = cleanEntryName(name)
-	if name == "" {
-		return rootID, nil
-	}
-	dir, base := filepath.Split(name)
-	pid, err := getIDByName(md, dir, rootID)
-	if err != nil {
-		return 0, err
-	}
-	if md[pid] == nil {
-		return 0, fmt.Errorf("not found metadata of %d", pid)
-	}
-	if md[pid].children == nil {
-		return 0, fmt.Errorf("not found children of %q", pid)
-	}
-	c, ok := md[pid].children[base]
-	if !ok {
-		return 0, fmt.Errorf("not found child %q in %d", base, pid)
-	}
-	return c.id, nil
-}
-
-func setChild(md map[uint32]*metadataEntry, pb *bolt.Bucket, pid uint32, base string, id uint32, isDir bool) error {
-	if md[pid] == nil {
-		md[pid] = &metadataEntry{}
-	}
-	if md[pid].children == nil {
-		md[pid].children = make(map[string]childEntry)
-	}
-	md[pid].children[base] = childEntry{base, id}
-	if isDir {
-		numLink, _ := binary.Varint(pb.Get(bucketKeyNumLink))
-		if err := putInt(pb, bucketKeyNumLink, numLink+1); err != nil {
-			return fmt.Errorf("cannot add numlink for children: %w", err)
-		}
-	}
-	return nil
-}
-
-func parentDir(p string) string {
-	dir, _ := path.Split(p)
-	return strings.TrimSuffix(dir, "/")
-}
-
-func cleanEntryName(name string) string {
-	// Use path.Clean to consistently deal with path separators across platforms.
-	return strings.TrimPrefix(path.Clean("/"+name), "/")
 }
 
 func (r *reader) NumOfNodes() (i int, _ error) {
