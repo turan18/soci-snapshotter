@@ -15,5 +15,3 @@
 */
 
 package http
-
-const ECRTokenExpiredResponse = "Your authorization token has expired. Reauthenticate and try again."

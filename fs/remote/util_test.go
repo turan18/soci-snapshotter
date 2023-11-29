@@ -39,9 +39,30 @@
 package remote
 
 import (
+	"context"
+	"net/http"
 	"reflect"
 	"testing"
+
+	socihttp "github.com/awslabs/soci-snapshotter/pkg/http"
 )
+
+type mockAuthHandler struct{}
+
+func (m *mockAuthHandler) HandleChallenge(ctx context.Context, resp *http.Response) error {
+	return nil
+}
+func (m *mockAuthHandler) AuthorizeRequest(ctx context.Context, req *http.Request) (*http.Request, error) {
+	return req, nil
+}
+
+func MockAuthHandler() socihttp.AuthHandler {
+	return &mockAuthHandler{}
+}
+
+func MockClient(tr http.RoundTripper) *http.Client {
+	return &http.Client{Transport: tr}
+}
 
 func TestRegionSet(t *testing.T) {
 	tests := []struct {

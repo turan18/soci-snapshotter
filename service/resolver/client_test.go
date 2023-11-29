@@ -14,7 +14,7 @@
    limitations under the License.
 */
 
-package http
+package resolver
 
 import (
 	"bytes"
@@ -163,11 +163,9 @@ func (b *mockBody) Close() error {
 }
 
 func TestAuthentication(t *testing.T) {
-
-	ecrForbiddenResponse, _ := docker.Errors([]error{docker.ErrorCodeDenied.WithMessage(ECRTokenExpiredResponse)}).MarshalJSON()
+	ecrForbiddenResponse, _ := docker.Errors([]error{docker.ErrorCodeDenied.WithMessage(ECRTokenExpiredResponseMessage)}).MarshalJSON()
 	normalForbiddenResponse, _ := docker.Errors([]error{docker.ErrorCodeDenied}).MarshalJSON()
 	unauthorizedResponse, _ := docker.Errors([]error{docker.ErrorCodeUnauthorized}).MarshalJSON()
-
 	testCases := []struct {
 		name        string
 		performAuth bool
@@ -207,7 +205,7 @@ func TestAuthentication(t *testing.T) {
 		},
 	}
 	for _, tc := range testCases {
-		shouldPerformAuthentication := ShouldAuthenticate(tc.response)
+		shouldPerformAuthentication := shouldAuthenticate(tc.response)
 		if tc.performAuth != shouldPerformAuthentication {
 			t.Fatalf("failed test case: %s: expected auth: %v; got auth: %v",
 				tc.name, tc.performAuth, shouldPerformAuthentication)
