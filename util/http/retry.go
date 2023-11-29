@@ -17,9 +17,7 @@
 package http
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -29,20 +27,14 @@ import (
 
 	"github.com/awslabs/soci-snapshotter/config"
 	logutil "github.com/awslabs/soci-snapshotter/util/http/log"
-	"github.com/awslabs/soci-snapshotter/version"
-	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/log"
 	rhttp "github.com/hashicorp/go-retryablehttp"
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	UserAgent = fmt.Sprintf("soci-snapshotter/%s", version.Version)
-)
-
 // NewRetryableClient creates a go http.Client which will automatically
 // retry on non-fatal errors
-func NewRetryableClient(config config.RetryableHTTPClientConfig) *http.Client {
+func NewRetryableClient(config config.RetryableHTTPClientConfig) *rhttp.Client {
 	rhttpClient := rhttp.NewClient()
 	// Don't log every request
 	rhttpClient.Logger = nil
@@ -53,10 +45,10 @@ func NewRetryableClient(config config.RetryableHTTPClientConfig) *http.Client {
 	rhttpClient.RetryWaitMax = time.Duration(config.MaxWaitMsec) * time.Millisecond
 	rhttpClient.Backoff = BackoffStrategy
 	rhttpClient.CheckRetry = RetryStrategy
-	rhttpClient.HTTPClient.Timeout = time.Duration(config.RequestTimeoutMsec) * time.Millisecond
 	rhttpClient.ErrorHandler = HandleHTTPError
 
 	// set timeouts
+	rhttpClient.HTTPClient.Timeout = time.Duration(config.RequestTimeoutMsec) * time.Millisecond
 	innerTransport := rhttpClient.HTTPClient.Transport
 	if t, ok := innerTransport.(*http.Transport); ok {
 		t.DialContext = (&net.Dialer{
@@ -65,7 +57,7 @@ func NewRetryableClient(config config.RetryableHTTPClientConfig) *http.Client {
 		t.ResponseHeaderTimeout = time.Duration(config.ResponseHeaderTimeoutMsec) * time.Millisecond
 	}
 
-	return rhttpClient.StandardClient()
+	return rhttpClient
 }
 
 // Jitter returns a number in the range duration to duration+(duration/divisor)-1, inclusive
@@ -137,53 +129,4 @@ func Drain(body io.ReadCloser) {
 	// but also want to limit the size read. 4KiB is arbitrary but reasonable.
 	const responseReadLimit = int64(4096)
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, responseReadLimit))
-}
-
-// ShouldAuthenticate takes a HTTP response and determines whether or not
-// it warrants authentication.
-func ShouldAuthenticate(resp *http.Response) bool {
-	switch resp.StatusCode {
-	case http.StatusUnauthorized:
-		return true
-	case http.StatusForbidden:
-
-		/*
-			Although in most cases 403 responses represent authorization issues that generally
-			cannot be resolved by re-authentication, some registries like ECR, will return a 403 on
-			credential expiration. (ref https://docs.aws.amazon.com/AmazonECR/latest/userguide/common-errors-docker.html#error-403)
-			In the case of ECR, the response body is structured according to the error format defined in the
-			Docker v2 API spec. (ref https://distribution.github.io/distribution/spec/api/#errors).
-			We will attempt to decode the response body as a `docker.Errors`. If it can be decoded,
-			we will ensure that the `Message` represents token expiration.
-		*/
-
-		// Since we drain the response body, we will copy it to a
-		// buffer and re-assign it so that callers can still read
-		// from it.
-		body, err := io.ReadAll(resp.Body)
-		defer func() {
-			resp.Body.Close()
-			resp.Body = io.NopCloser(bytes.NewReader(body))
-		}()
-
-		if err != nil {
-			return false
-		}
-
-		var errs docker.Errors
-		if err = json.Unmarshal(body, &errs); err != nil {
-			return false
-		}
-		for _, e := range errs {
-			if err, ok := e.(docker.Error); ok {
-				if err.Message == ECRTokenExpiredResponse {
-					return true
-				}
-			}
-		}
-
-	default:
-	}
-
-	return false
 }
