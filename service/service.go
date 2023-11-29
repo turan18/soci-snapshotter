@@ -42,6 +42,7 @@ import (
 	"github.com/awslabs/soci-snapshotter/fs/source"
 	"github.com/awslabs/soci-snapshotter/service/resolver"
 	snbase "github.com/awslabs/soci-snapshotter/snapshot"
+	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
 	"github.com/containerd/log"
@@ -51,7 +52,7 @@ type Option func(*options)
 
 type options struct {
 	credsFuncs    []resolver.Credential
-	registryHosts source.RegistryHosts
+	registryHosts docker.RegistryHosts
 	fsOpts        []socifs.Option
 }
 
@@ -63,7 +64,7 @@ func WithCredsFuncs(creds ...resolver.Credential) Option {
 }
 
 // WithCustomRegistryHosts is registry hosts to use instead.
-func WithCustomRegistryHosts(hosts source.RegistryHosts) Option {
+func WithCustomRegistryHosts(hosts docker.RegistryHosts) Option {
 	return func(o *options) {
 		o.registryHosts = hosts
 	}
@@ -83,10 +84,14 @@ func NewSociSnapshotterService(ctx context.Context, root string, serviceCfg *con
 		o(&sOpts)
 	}
 
+	httpConfig := serviceCfg.FSConfig.RetryableHTTPClientConfig
+	registryConfig := serviceCfg.ResolverConfig
+
 	hosts := sOpts.registryHosts
 	if hosts == nil {
 		// Use RegistryHosts based on ResolverConfig and keychain
-		hosts = resolver.RegistryHostsFromConfig(serviceCfg.ResolverConfig, serviceCfg.FSConfig.RetryableHTTPClientConfig, sOpts.credsFuncs...)
+		registryManager := resolver.NewRegistryManager(httpConfig, registryConfig, sOpts.credsFuncs)
+		hosts = registryManager.ConfigureRegistries()
 	}
 	userxattr, err := overlayutils.NeedsUserXAttr(snapshotterRoot(root))
 	if err != nil {

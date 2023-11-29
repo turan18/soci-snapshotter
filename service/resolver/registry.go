@@ -33,55 +33,102 @@
 package resolver
 
 import (
+	"fmt"
+	"net/http"
+	"sync"
+
 	"github.com/awslabs/soci-snapshotter/config"
-	"github.com/awslabs/soci-snapshotter/fs/source"
-	socihttp "github.com/awslabs/soci-snapshotter/util/http"
-	"github.com/containerd/containerd/reference"
+	shttp "github.com/awslabs/soci-snapshotter/util/http"
+	"github.com/awslabs/soci-snapshotter/version"
 	"github.com/containerd/containerd/remotes/docker"
 )
 
-type Credential func(string, reference.Spec) (string, string, error)
+type Credential func(string) (string, string, error)
+type RegistryManager struct {
+	// client is the global HTTP client to be shared across hosts
+	client          *http.Client
+	httpConfig      config.RetryableHTTPClientConfig
+	registryConfig  config.ResolverConfig
+	registryHostMap *sync.Map
+}
 
-// RegistryHostsFromConfig creates RegistryHosts (a set of registry configuration) from Config.
-func RegistryHostsFromConfig(registryConfig config.ResolverConfig, httpConfig config.RetryableHTTPClientConfig, credsFuncs ...Credential) source.RegistryHosts {
-	return func(ref reference.Spec) (hosts []docker.RegistryHost, _ error) {
-		host := ref.Hostname()
-		for _, h := range append(registryConfig.Host[host].Mirrors, config.MirrorConfig{
-			Host: host,
-		}) {
-			if h.RequestTimeoutSec < 0 {
-				httpConfig.RequestTimeoutMsec = 0
-			}
-			if h.RequestTimeoutSec > 0 {
-				httpConfig.RequestTimeoutMsec = h.RequestTimeoutSec * 1000
-			}
-			client := socihttp.NewRetryableClient(httpConfig)
-			config := docker.RegistryHost{
-				Client:       client,
-				Host:         h.Host,
-				Scheme:       "https",
-				Path:         "/v2",
-				Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve,
-				Authorizer: docker.NewDockerAuthorizer(
-					docker.WithAuthClient(client),
-					docker.WithAuthCreds(multiCredsFuncs(ref, credsFuncs...))),
-			}
-			if localhost, _ := docker.MatchLocalhost(config.Host); localhost || h.Insecure {
-				config.Scheme = "http"
-			}
-			if config.Host == "docker.io" {
-				config.Host = "registry-1.docker.io"
-			}
-			hosts = append(hosts, config)
+type RegistryManagerOpt func(*RegistryManager)
+
+func GlobalHeader() http.Header {
+	header := http.Header{}
+	header.Set("User-Agent", fmt.Sprintf("soci-snapshotter/%s", version.Version))
+	return header
+}
+
+// NewRegistryManager
+func NewRegistryManager(httpConfig config.RetryableHTTPClientConfig, registryConfig config.ResolverConfig, credsFuncs []Credential) *RegistryManager {
+	regMngr := &RegistryManager{
+		httpConfig:      httpConfig,
+		registryConfig:  registryConfig,
+		registryHostMap: &sync.Map{},
+	}
+	authClientOpts := []shttp.AuthClientOpt{shttp.WithCredentialProvider(multiCredsFuncs(credsFuncs...)), shttp.WithHeader(GlobalHeader())}
+	regMngr.client = shttp.NewStandardAuthClient(httpConfig, authClientOpts...)
+	return regMngr
+}
+
+// ConfigureRegistries
+func (rm *RegistryManager) ConfigureRegistries() docker.RegistryHosts {
+	return func(host string) ([]docker.RegistryHost, error) {
+		if host == "docker.io" {
+			host = "registry-1.docker.io"
 		}
-		return
+		registryHosts := []docker.RegistryHost{}
+
+		// Check whether registry host configurations exist for this host
+		// in the cache.
+		if hostConfigurations, ok := rm.registryHostMap.Load(host); ok {
+			return hostConfigurations.([]docker.RegistryHost), nil
+		}
+		// If mirrors exist for this host, create new `RegistryHost` configurations
+		// for them.
+		if hostConfig, ok := rm.registryConfig.Host[host]; ok {
+			for _, mirror := range hostConfig.Mirrors {
+				var client *http.Client
+				scheme := "https"
+				if localhost, _ := docker.MatchLocalhost(mirror.Host); localhost || mirror.Insecure {
+					scheme = "http"
+				}
+				if mirror.RequestTimeoutSec > 0 {
+					rm.httpConfig.RequestTimeoutMsec = mirror.RequestTimeoutSec * 1000
+					if globalAuthClient, ok := rm.client.Transport.(*shttp.AuthClient); ok {
+						client = globalAuthClient.Clone(rm.httpConfig)
+					}
+				}
+				registryHosts = append(registryHosts, docker.RegistryHost{
+					Client:       client,
+					Host:         mirror.Host,
+					Scheme:       scheme,
+					Path:         "/v2",
+					Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve,
+				})
+			}
+		}
+		// Create a `RegistryHost` configuration for this specific host.
+		registryHosts = append(registryHosts, docker.RegistryHost{
+			Client:       rm.client,
+			Host:         host,
+			Scheme:       "https",
+			Path:         "/v2",
+			Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve,
+		})
+
+		// Cache all `RegistryHost` configurations for this host
+		rm.registryHostMap.Store(host, registryHosts)
+
+		return registryHosts, nil
 	}
 }
 
-func multiCredsFuncs(ref reference.Spec, credsFuncs ...Credential) func(string) (string, string, error) {
+func multiCredsFuncs(credsFuncs ...Credential) func(string) (string, string, error) {
 	return func(host string) (string, string, error) {
 		for _, f := range credsFuncs {
-			if username, secret, err := f(host, ref); err != nil {
+			if username, secret, err := f(host); err != nil {
 				return "", "", err
 			} else if !(username == "" && secret == "") {
 				return username, secret, nil
@@ -90,3 +137,39 @@ func multiCredsFuncs(ref reference.Spec, credsFuncs ...Credential) func(string) 
 		return "", "", nil
 	}
 }
+
+// // RegistryHostsFromConfig creates RegistryHosts (a set of registry configuration) from Config.
+// func RegistryHostsFromConfig(registryConfig config.ResolverConfig, httpConfig config.RetryableHTTPClientConfig, credsFuncs ...Credential) source.RegistryHosts {
+// 	return func(ref reference.Spec) (hosts []docker.RegistryHost, _ error) {
+// 		host := ref.Hostname()
+// 		for _, h := range append(registryConfig.Host[host].Mirrors, config.MirrorConfig{
+// 			Host: host,
+// 		}) {
+// 			if h.RequestTimeoutSec < 0 {
+// 				httpConfig.RequestTimeoutMsec = 0
+// 			}
+// 			if h.RequestTimeoutSec > 0 {
+// 				httpConfig.RequestTimeoutMsec = h.RequestTimeoutSec * 1000
+// 			}
+// 			client := socihttp.NewRetryableClient(httpConfig)
+// 			config := docker.RegistryHost{
+// 				Client:       client,
+// 				Host:         h.Host,
+// 				Scheme:       "https",
+// 				Path:         "/v2",
+// 				Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve,
+// 				Authorizer: docker.NewDockerAuthorizer(
+// 					docker.WithAuthClient(client),
+// 					docker.WithAuthCreds(multiCredsFuncs(ref, credsFuncs...))),
+// 			}
+// 			if localhost, _ := docker.MatchLocalhost(config.Host); localhost || h.Insecure {
+// 				config.Scheme = "http"
+// 			}
+// 			if config.Host == "docker.io" {
+// 				config.Host = "registry-1.docker.io"
+// 			}
+// 			hosts = append(hosts, config)
+// 		}
+// 		return
+// 	}
+// }

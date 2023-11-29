@@ -47,8 +47,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/awslabs/soci-snapshotter/fs/source"
 	"github.com/containerd/containerd/reference"
+	"github.com/containerd/containerd/remotes/docker"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -59,7 +59,7 @@ type Blob interface {
 	Size() int64
 	FetchedSize() int64
 	ReadAt(p []byte, offset int64, opts ...Option) (int, error)
-	Refresh(ctx context.Context, host source.RegistryHosts, refspec reference.Spec, desc ocispec.Descriptor) error
+	Refresh(ctx context.Context, hosts []docker.RegistryHost, refspec reference.Spec, desc ocispec.Descriptor) error
 	Close() error
 }
 
@@ -110,7 +110,7 @@ func (b *blob) isClosed() bool {
 	return closed
 }
 
-func (b *blob) Refresh(ctx context.Context, hosts source.RegistryHosts, refspec reference.Spec, desc ocispec.Descriptor) error {
+func (b *blob) Refresh(ctx context.Context, hosts []docker.RegistryHost, refspec reference.Spec, desc ocispec.Descriptor) error {
 	if b.isClosed() {
 		return fmt.Errorf("blob is already closed")
 	}

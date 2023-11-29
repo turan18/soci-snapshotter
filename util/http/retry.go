@@ -17,9 +17,7 @@
 package http
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -29,20 +27,14 @@ import (
 
 	"github.com/awslabs/soci-snapshotter/config"
 	logutil "github.com/awslabs/soci-snapshotter/util/http/log"
-	"github.com/awslabs/soci-snapshotter/version"
-	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/log"
 	rhttp "github.com/hashicorp/go-retryablehttp"
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	UserAgent = fmt.Sprintf("soci-snapshotter/%s", version.Version)
-)
-
-// NewRetryableClient creates a go http.Client which will automatically
+// newRetryableClient creates a go http.Client which will automatically
 // retry on non-fatal errors
-func NewRetryableClient(config config.RetryableHTTPClientConfig) *http.Client {
+func newRetryableClient(config config.RetryableHTTPClientConfig) *rhttp.Client {
 	rhttpClient := rhttp.NewClient()
 	// Don't log every request
 	rhttpClient.Logger = nil
@@ -51,12 +43,12 @@ func NewRetryableClient(config config.RetryableHTTPClientConfig) *http.Client {
 	rhttpClient.RetryMax = config.MaxRetries
 	rhttpClient.RetryWaitMin = time.Duration(config.MinWaitMsec) * time.Millisecond
 	rhttpClient.RetryWaitMax = time.Duration(config.MaxWaitMsec) * time.Millisecond
-	rhttpClient.Backoff = BackoffStrategy
-	rhttpClient.CheckRetry = RetryStrategy
-	rhttpClient.HTTPClient.Timeout = time.Duration(config.RequestTimeoutMsec) * time.Millisecond
-	rhttpClient.ErrorHandler = HandleHTTPError
+	rhttpClient.Backoff = backoffStrategy
+	rhttpClient.CheckRetry = retryStrategy
+	rhttpClient.ErrorHandler = handleHTTPError
 
 	// set timeouts
+	rhttpClient.HTTPClient.Timeout = time.Duration(config.RequestTimeoutMsec) * time.Millisecond
 	innerTransport := rhttpClient.HTTPClient.Transport
 	if t, ok := innerTransport.(*http.Transport); ok {
 		t.DialContext = (&net.Dialer{
@@ -65,27 +57,27 @@ func NewRetryableClient(config config.RetryableHTTPClientConfig) *http.Client {
 		t.ResponseHeaderTimeout = time.Duration(config.ResponseHeaderTimeoutMsec) * time.Millisecond
 	}
 
-	return rhttpClient.StandardClient()
+	return rhttpClient
 }
 
-// Jitter returns a number in the range duration to duration+(duration/divisor)-1, inclusive
-func Jitter(duration time.Duration, divisor int64) time.Duration {
+// jitter returns a number in the range duration to duration+(duration/divisor)-1, inclusive
+func jitter(duration time.Duration, divisor int64) time.Duration {
 	return time.Duration(rand.Int63n(int64(duration)/divisor) + int64(duration))
 }
 
-// BackoffStrategy extends retryablehttp's DefaultBackoff to add a random jitter to avoid
+// backoffStrategy extends retryablehttp's DefaultBackoff to add a random jitter to avoid
 // overwhelming the repository when it comes back online
 // DefaultBackoff either tries to parse the 'Retry-After' header of the response; or, it uses an
 // exponential backoff 2 ^ numAttempts, limited by max
-func BackoffStrategy(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
+func backoffStrategy(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
 	delayTime := rhttp.DefaultBackoff(min, max, attemptNum, resp)
-	return Jitter(delayTime, 8)
+	return jitter(delayTime, 8)
 }
 
-// RetryStrategy extends retryablehttp's DefaultRetryPolicy to log the error and response when retrying
+// retryStrategy extends retryablehttp's DefaultRetryPolicy to log the error and response when retrying
 // DefaultRetryPolicy retries whenever err is non-nil (except for some url errors) or if returned
 // status code is 429 or 5xx (except 501)
-func RetryStrategy(ctx context.Context, resp *http.Response, err error) (bool, error) {
+func retryStrategy(ctx context.Context, resp *http.Response, err error) (bool, error) {
 	retry, err2 := rhttp.DefaultRetryPolicy(ctx, resp, err)
 	if retry {
 		log.G(ctx).WithFields(logrus.Fields{
@@ -96,9 +88,9 @@ func RetryStrategy(ctx context.Context, resp *http.Response, err error) (bool, e
 	return retry, logutil.RedactHTTPQueryValuesFromError(err2)
 }
 
-// HandleHTTPError implements retryablehttp client's ErrorHandler to ensure returned errors
+// handleHTTPError implements retryablehttp client's ErrorHandler to ensure returned errors
 // have HTTP query values redacted to prevent leaking sensitive information like encoded credentials or tokens.
-func HandleHTTPError(resp *http.Response, err error, attempts int) (*http.Response, error) {
+func handleHTTPError(resp *http.Response, err error, attempts int) (*http.Response, error) {
 	var (
 		method = "unknown"
 		url    = "unknown"
@@ -137,53 +129,4 @@ func Drain(body io.ReadCloser) {
 	// but also want to limit the size read. 4KiB is arbitrary but reasonable.
 	const responseReadLimit = int64(4096)
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, responseReadLimit))
-}
-
-// ShouldAuthenticate takes a HTTP response and determines whether or not
-// it warrants authentication.
-func ShouldAuthenticate(resp *http.Response) bool {
-	switch resp.StatusCode {
-	case http.StatusUnauthorized:
-		return true
-	case http.StatusForbidden:
-
-		/*
-			Although in most cases 403 responses represent authorization issues that generally
-			cannot be resolved by re-authentication, some registries like ECR, will return a 403 on
-			credential expiration. (ref https://docs.aws.amazon.com/AmazonECR/latest/userguide/common-errors-docker.html#error-403)
-			In the case of ECR, the response body is structured according to the error format defined in the
-			Docker v2 API spec. (ref https://distribution.github.io/distribution/spec/api/#errors).
-			We will attempt to decode the response body as a `docker.Errors`. If it can be decoded,
-			we will ensure that the `Message` represents token expiration.
-		*/
-
-		// Since we drain the response body, we will copy it to a
-		// buffer and re-assign it so that callers can still read
-		// from it.
-		body, err := io.ReadAll(resp.Body)
-		defer func() {
-			resp.Body.Close()
-			resp.Body = io.NopCloser(bytes.NewReader(body))
-		}()
-
-		if err != nil {
-			return false
-		}
-
-		var errs docker.Errors
-		if err = json.Unmarshal(body, &errs); err != nil {
-			return false
-		}
-		for _, e := range errs {
-			if err, ok := e.(docker.Error); ok {
-				if err.Message == ECRTokenExpiredResponse {
-					return true
-				}
-			}
-		}
-
-	default:
-	}
-
-	return false
 }

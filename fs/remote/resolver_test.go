@@ -154,21 +154,18 @@ func TestMirror(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hosts := func(refspec reference.Spec) (reghosts []docker.RegistryHost, _ error) {
-				host := refspec.Hostname()
-				for _, m := range append(tt.mirrors, host) {
-					reghosts = append(reghosts, docker.RegistryHost{
-						Client:       &http.Client{Transport: tt.tr},
-						Host:         m,
-						Scheme:       "https",
-						Path:         "/v2",
-						Capabilities: docker.HostCapabilityPull,
-					})
-				}
-				return
+			var regHosts []docker.RegistryHost
+			for _, m := range tt.mirrors {
+				regHosts = append(regHosts, docker.RegistryHost{
+					Client:       &http.Client{Transport: tt.tr},
+					Host:         m,
+					Scheme:       "https",
+					Path:         "/v2",
+					Capabilities: docker.HostCapabilityPull,
+				})
 			}
 			fetcher, err := newHTTPFetcher(context.Background(), &fetcherConfig{
-				hosts:   hosts,
+				hosts:   regHosts,
 				refspec: refspec,
 				desc:    ocispec.Descriptor{Digest: blobDigest},
 			})
@@ -178,9 +175,9 @@ func TestMirror(t *testing.T) {
 				}
 				t.Fatalf("failed to resolve reference: %v", err)
 			}
-			nurl, err := url.Parse(fetcher.url)
+			nurl, err := url.Parse(fetcher.realBlobURL)
 			if err != nil {
-				t.Fatalf("failed to parse url %q: %v", fetcher.url, err)
+				t.Fatalf("failed to parse url %q: %v", fetcher.realBlobURL, err)
 			}
 			if nurl.Hostname() != tt.wantHost {
 				t.Errorf("invalid hostname %q(%q); want %q",
@@ -242,8 +239,8 @@ func (tr *sampleRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 func TestCheck(t *testing.T) {
 	tr := &breakRoundTripper{}
 	f := &httpFetcher{
-		url: "test",
-		tr:  tr,
+		realBlobURL: "test",
+		tr:          tr,
 	}
 	tr.success = true
 	if err := f.check(); err != nil {
