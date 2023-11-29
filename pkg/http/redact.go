@@ -14,7 +14,7 @@
    limitations under the License.
 */
 
-package log
+package http
 
 import (
 	"errors"
@@ -48,4 +48,15 @@ func RedactHTTPQueryValuesFromURL(url *url.URL) {
 			url.RawQuery = query.Encode()
 		}
 	}
+}
+
+// RedactHTTPQueryValuesFromURL redacts HTTP query values from a string.
+func RedactHTTPQueryValuesFromString(surl string) string {
+	url, err := url.Parse(surl)
+	if err == nil {
+		RedactHTTPQueryValuesFromURL(url)
+		return url.String()
+	}
+	return surl
+
 }
