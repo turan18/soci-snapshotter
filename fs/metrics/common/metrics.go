@@ -86,7 +86,7 @@ const (
 	BackgroundFetch   = "background_fetch"
 
 	SynchronousReadCount              = "synchronous_read_count"
-	SynchronousReadRegistryFetchCount = "synchronous_read_remote_registry_fetch_count" // TODO revisit (wrong place)
+	SynchronousReadRegistryFetchCount = "synchronous_read_remote_registry_fetch_count"
 	SynchronousBytesServed            = "synchronous_bytes_served"
 
 	// Global fuse failure state

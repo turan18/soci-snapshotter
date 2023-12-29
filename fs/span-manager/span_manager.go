@@ -25,6 +25,7 @@ import (
 	"runtime"
 
 	"github.com/awslabs/soci-snapshotter/cache"
+	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
 	"github.com/awslabs/soci-snapshotter/ztoc"
 	"github.com/awslabs/soci-snapshotter/ztoc/compression"
 	"github.com/opencontainers/go-digest"
@@ -64,6 +65,7 @@ func (src *SectionReaderCloser) Close() error {
 
 // SpanManager fetches and caches spans of a given layer.
 type SpanManager struct {
+	layerDigest                       digest.Digest
 	cache                             cache.BlobCache
 	cacheOpt                          []cache.Option
 	zinfo                             compression.Zinfo
@@ -88,7 +90,7 @@ type spanInfo struct {
 
 // New creates a SpanManager with given ztoc and content reader, and builds all
 // spans based on the ztoc.
-func New(ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries int, cacheOpt ...cache.Option) *SpanManager {
+func New(layerDigest digest.Digest, ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries int, cacheOpt ...cache.Option) *SpanManager {
 	index, err := ztoc.Zinfo()
 	if err != nil {
 		return nil
@@ -96,6 +98,7 @@ func New(ztoc *ztoc.Ztoc, r *io.SectionReader, cache cache.BlobCache, retries in
 	ztoc.Checkpoints = nil
 	spans := make([]*span, ztoc.MaxSpanID+1)
 	m := &SpanManager{
+		layerDigest:                       layerDigest,
 		cache:                             cache,
 		cacheOpt:                          cacheOpt,
 		zinfo:                             index,
@@ -289,6 +292,11 @@ func (m *SpanManager) getSpanContent(spanID compression.SpanID, offsetStart, off
 		}
 		return io.NopCloser(bytes.NewReader(uncompSpanBuf[offsetStart : offsetStart+size])), nil
 	}
+
+	// The synchronously requested span content is unavailable locally and so we
+	// must fetch it over the network. Increment the synchronous remote fetch
+	// counter metric.
+	commonmetrics.IncOperationCount(commonmetrics.SynchronousReadRegistryFetchCount, m.layerDigest)
 
 	// fetch-uncompress-cache span: span state can only be `unrequested` since
 	// no goroutine will release span state lock in `requested` state

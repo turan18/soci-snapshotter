@@ -161,8 +161,9 @@ func makeFile(t *testing.T, contents []byte, prefix string, factory metadata.Sto
 	if err != nil {
 		t.Fatalf("failed to create reader: %v", err)
 	}
-	spanManager := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
-	vr, err := NewReader(mr, digest.FromString(""), spanManager, false)
+	layerDigest := digest.FromString("")
+	spanManager := spanmanager.New(layerDigest, ztoc, sr, cache.NewMemoryCache(), 0)
+	vr, err := NewReader(mr, layerDigest, spanManager, false)
 	if err != nil {
 		mr.Close()
 		t.Fatalf("failed to make new reader: %v", err)
@@ -217,8 +218,9 @@ func testFailReader(t *testing.T, factory metadata.Store) {
 			if !found {
 				t.Fatalf("free ID not found")
 			}
-			spanManager := spanmanager.New(ztoc, sr, cache.NewMemoryCache(), 0)
-			vr, err := NewReader(mr, digest.FromString(""), spanManager, false)
+			layerDigest := digest.FromString("")
+			spanManager := spanmanager.New(layerDigest, ztoc, sr, cache.NewMemoryCache(), 0)
+			vr, err := NewReader(mr, layerDigest, spanManager, false)
 			if err != nil {
 				mr.Close()
 				t.Fatalf("failed to make new reader: %v", err)
