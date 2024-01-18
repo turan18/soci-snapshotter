@@ -189,7 +189,7 @@ func BuildTarZstd(ents []TarEntry, compressionLevel int, opts ...BuildTarOption)
 // WriteTarToTempFile writes the contents of a tar archive to a specified path and
 // return the temp filename and the tar data (as []byte).
 //
-// It's the caller's responsibility to remove the genreated temp file.
+// It's the caller's responsibility to remove the generated temp file.
 func WriteTarToTempFile(tarNamePattern string, tarReader io.Reader) (string, []byte, error) {
 	tarFile, err := os.CreateTemp("", tarNamePattern)
 	if err != nil {
@@ -492,4 +492,12 @@ func permAndExtraMode2TarMode(fm os.FileMode) (tm int64) {
 		tm |= cISVTX
 	}
 	return
+}
+
+func GenerateFileTarEntries(numEntries int) []TarEntry {
+	tarEntries := []TarEntry{}
+	for i := 0; i < numEntries; i++ {
+		tarEntries = append(tarEntries, File(fmt.Sprintf("%v.txt", i), string(RandomByteData(2))))
+	}
+	return tarEntries
 }
