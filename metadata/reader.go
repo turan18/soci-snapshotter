@@ -164,7 +164,7 @@ func (r *reader) initRootNode(fsID string) error {
 		if err != nil {
 			return err
 		}
-		if err := writeAttr(rootBucket, &Attr{
+		if err := writeNodeEntry(rootBucket, &Attr{
 			Mode:    os.ModeDir | 0755,
 			NumLink: 2, // The directory itself(.) and the parent link to this directory.
 		}); err != nil {
@@ -176,99 +176,116 @@ func (r *reader) initRootNode(fsID string) error {
 }
 
 func (r *reader) initNodes(toc ztoc.TOC) error {
+	const chunkSize = 1000
+
 	md := make(map[uint32]*metadataEntry)
-	if err := r.db.Batch(func(tx *bolt.Tx) (err error) {
-		nodes, err := getNodes(tx, r.fsID)
+	fileMdChunks := chunks(toc.FileMetadata, chunkSize)
+	var attr Attr
+	for _, chunks := range fileMdChunks {
+		err := r.db.Batch(func(tx *bolt.Tx) (err error) {
+			filesystems := tx.Bucket(bucketKeyFilesystems)
+			if filesystems == nil {
+				return fmt.Errorf("fs %q not found: no fs is registered", r.fsID)
+			}
+			lbkt := filesystems.Bucket([]byte(r.fsID))
+			if lbkt == nil {
+				return fmt.Errorf("fs bucket for %q not found", r.fsID)
+			}
+			lbkt.FillPercent = 1.0
+
+			nodes, err := getNodesBucket(tx, r.fsID)
+			if err != nil {
+				return err
+			}
+			nodes.FillPercent = 1.0 // we only do sequential write to this bucket
+
+			for _, ent := range chunks {
+				var id uint32
+				var b *bolt.Bucket
+
+				// TAR stores trailing path separator for directory entries. We clean
+				// the path to remove the trailing separator, so that we can recurse
+				// parent paths using `filepath.Split`.
+				cleanName := cleanEntryPath(ent.Name)
+				cleanLinkName := cleanEntryPath(ent.Linkname)
+
+				isLink := ent.Type == "hardlink"
+				isDir := ent.Type == "dir"
+
+				if isLink {
+					id, err = getIDByName(md, cleanLinkName, r.rootID)
+					if err != nil {
+						return fmt.Errorf("%q is a hardlink but cannot get link destination %q: %w", ent.Name, ent.Linkname, err)
+					}
+					b, err = getNodeBucketByID(nodes, id)
+					if err != nil {
+						return fmt.Errorf("cannot get hardlink destination %q ==> %q (%d): %w", ent.Name, ent.Linkname, id, err)
+					}
+					numLink, _ := binary.Varint(b.Get(bucketKeyNumLink))
+					if err := putInt(b, bucketKeyNumLink, numLink+1); err != nil {
+						return fmt.Errorf("cannot put NumLink of %q ==> %q: %w", ent.Name, ent.Linkname, err)
+					}
+				} else {
+					// Write node bucket
+					var found bool
+					if isDir {
+						// Check if this directory is already created, if so overwrite it.
+						id, err = getIDByName(md, cleanName, r.rootID)
+						if err == nil {
+							b, err = getNodeBucketByID(nodes, id)
+							if err != nil {
+								return fmt.Errorf("failed to get directory bucket %d: %w", id, err)
+							}
+							found = true
+							attr.NumLink = readNumLink(b)
+						}
+					}
+					if !found {
+						// No existing node. Create a new one.
+						id, err = r.nextID()
+						if err != nil {
+							return err
+						}
+						b, err = nodes.CreateBucket(encodeID(id))
+						if err != nil {
+							return err
+						}
+						attr.NumLink = 1 // at least the parent dir references this directory.
+						if isDir {
+							attr.NumLink++ // at least "." references this directory.
+						}
+					}
+					// Write the new node object to the node bucket.
+					if err := writeNodeEntry(b, attrFromZtocEntry(&ent, &attr)); err != nil {
+						return fmt.Errorf("failed to set attr to %d(%q): %w", id, ent.Name, err)
+					}
+				}
+
+				// Create relationship between node and its parent.
+				parentDirectoryName := parentDir(cleanName)
+				parentID, parentBucket, err := r.getOrCreateDir(nodes, md, parentDirectoryName, r.rootID)
+				if err != nil {
+					return fmt.Errorf("failed to create parent directory %q of %q: %w", parentDirectoryName, ent.Name, err)
+				}
+				if err := setChild(md, parentBucket, parentID, filepath.Base(cleanName), id, isDir); err != nil {
+					return err
+				}
+
+				if !isLink {
+					if md[id] == nil {
+						md[id] = &metadataEntry{}
+					}
+					md[id].TarName = ent.Name
+					md[id].UncompressedOffset = ent.UncompressedOffset
+					md[id].TarHeaderOffset = ent.TarHeaderOffset
+					md[id].TarHeaderSize = ent.UncompressedOffset - ent.TarHeaderOffset
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		nodes.FillPercent = 1.0 // we only do sequential write to this bucket
-		var attr Attr
-		for _, ent := range toc.FileMetadata {
-			var id uint32
-			var b *bolt.Bucket
-
-			// TAR stores trailing path separator for directory entries. We clean
-			// the path to remove the trailing separator, so that we can recurse
-			// parent paths using `filepath.Split`.
-			cleanName := cleanEntryPath(ent.Name)
-			cleanLinkName := cleanEntryPath(ent.Linkname)
-
-			isLink := ent.Type == "hardlink"
-			isDir := ent.Type == "dir"
-
-			if isLink {
-				id, err = getIDByName(md, cleanLinkName, r.rootID)
-				if err != nil {
-					return fmt.Errorf("%q is a hardlink but cannot get link destination %q: %w", ent.Name, ent.Linkname, err)
-				}
-				b, err = getNodeBucketByID(nodes, id)
-				if err != nil {
-					return fmt.Errorf("cannot get hardlink destination %q ==> %q (%d): %w", ent.Name, ent.Linkname, id, err)
-				}
-				numLink, _ := binary.Varint(b.Get(bucketKeyNumLink))
-				if err := putInt(b, bucketKeyNumLink, numLink+1); err != nil {
-					return fmt.Errorf("cannot put NumLink of %q ==> %q: %w", ent.Name, ent.Linkname, err)
-				}
-			} else {
-				// Write node bucket
-				var found bool
-				if isDir {
-					// Check if this directory is already created, if so overwrite it.
-					id, err = getIDByName(md, cleanName, r.rootID)
-					if err == nil {
-						b, err = getNodeBucketByID(nodes, id)
-						if err != nil {
-							return fmt.Errorf("failed to get directory bucket %d: %w", id, err)
-						}
-						found = true
-						attr.NumLink = readNumLink(b)
-					}
-				}
-				if !found {
-					// No existing node. Create a new one.
-					id, err = r.nextID()
-					if err != nil {
-						return err
-					}
-					b, err = nodes.CreateBucket(encodeID(id))
-					if err != nil {
-						return err
-					}
-					attr.NumLink = 1 // at least the parent dir references this directory.
-					if isDir {
-						attr.NumLink++ // at least "." references this directory.
-					}
-				}
-				// Write the new node object to the node bucket.
-				if err := writeAttr(b, attrFromZtocEntry(&ent, &attr)); err != nil {
-					return fmt.Errorf("failed to set attr to %d(%q): %w", id, ent.Name, err)
-				}
-			}
-
-			// Create relationship between node and its parent.
-			parentDirectoryName := parentDir(cleanName)
-			parentID, parentBucket, err := r.getOrCreateDir(nodes, md, parentDirectoryName, r.rootID)
-			if err != nil {
-				return fmt.Errorf("failed to create parent directory %q of %q: %w", parentDirectoryName, ent.Name, err)
-			}
-			if err := setChild(md, parentBucket, parentID, filepath.Base(cleanName), id, isDir); err != nil {
-				return err
-			}
-
-			if !isLink {
-				if md[id] == nil {
-					md[id] = &metadataEntry{}
-				}
-				md[id].TarName = ent.Name
-				md[id].UncompressedOffset = ent.UncompressedOffset
-				md[id].TarHeaderOffset = ent.TarHeaderOffset
-				md[id].TarHeaderSize = ent.UncompressedOffset - ent.TarHeaderOffset
-			}
-		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	addendum := make([]struct {
@@ -280,29 +297,43 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 		addendum[i].id, addendum[i].md = encodeID(id), d
 		i++
 	}
+	// Sort metadata by node ID
 	sort.Slice(addendum, func(i, j int) bool {
 		return bytes.Compare(addendum[i].id, addendum[j].id) < 0
 	})
 
-	if err := r.db.Batch(func(tx *bolt.Tx) (err error) {
-		meta, err := getMetadata(tx, r.fsID)
-		if err != nil {
-			return err
-		}
-		meta.FillPercent = 1.0 // we only do sequential write to this bucket
+	mdChunks := chunks(addendum, chunkSize)
+	for _, chunks := range mdChunks {
+		err := r.db.Batch(func(tx *bolt.Tx) (err error) {
+			filesystems := tx.Bucket(bucketKeyFilesystems)
+			if filesystems == nil {
+				return fmt.Errorf("fs %q not found: no fs is registered", r.fsID)
+			}
+			lbkt := filesystems.Bucket([]byte(r.fsID))
+			if lbkt == nil {
+				return fmt.Errorf("fs bucket for %q not found", r.fsID)
+			}
+			lbkt.FillPercent = 1.0
 
-		for _, m := range addendum {
-			md, err := meta.CreateBucket(m.id)
+			meta, err := getMetadataBucket(tx, r.fsID)
 			if err != nil {
 				return err
 			}
-			if err := writeMetadataEntry(md, m.md); err != nil {
-				return err
+			meta.FillPercent = 1.0 // we only do sequential write to this bucket
+			for _, m := range chunks {
+				md, err := meta.CreateBucket(m.id)
+				if err != nil {
+					return err
+				}
+				if err := writeMetadataEntry(md, m.md); err != nil {
+					return err
+				}
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	return nil
@@ -334,7 +365,7 @@ func (r *reader) getOrCreateDir(nodes *bolt.Bucket, md map[uint32]*metadataEntry
 		Mode:    os.ModeDir | 0755,
 		NumLink: 2, // The directory itself(.) and the parent link to this directory.
 	}
-	if err := writeAttr(b, attr); err != nil {
+	if err := writeNodeEntry(b, attr); err != nil {
 		return 0, nil, err
 	}
 
@@ -390,7 +421,7 @@ func (r *reader) Close() error {
 func (r *reader) GetAttr(id uint32) (attr Attr, _ error) {
 	if r.rootID == id { // no need to wait for root dir
 		if err := r.db.View(func(tx *bolt.Tx) error {
-			nodes, err := getNodes(tx, r.fsID)
+			nodes, err := getNodesBucket(tx, r.fsID)
 			if err != nil {
 				return fmt.Errorf("nodes bucket of %q not found for sarching attr %d: %w", r.fsID, id, err)
 			}
@@ -398,14 +429,14 @@ func (r *reader) GetAttr(id uint32) (attr Attr, _ error) {
 			if err != nil {
 				return fmt.Errorf("failed to get attr bucket %d: %w", id, err)
 			}
-			return readAttr(b, &attr)
+			return readNodeEntryToAttr(b, &attr)
 		}); err != nil {
 			return Attr{}, err
 		}
 		return attr, nil
 	}
 	if err := r.view(func(tx *bolt.Tx) error {
-		nodes, err := getNodes(tx, r.fsID)
+		nodes, err := getNodesBucket(tx, r.fsID)
 		if err != nil {
 			return fmt.Errorf("nodes bucket of %q not found for sarching attr %d: %w", r.fsID, id, err)
 		}
@@ -413,7 +444,7 @@ func (r *reader) GetAttr(id uint32) (attr Attr, _ error) {
 		if err != nil {
 			return fmt.Errorf("failed to get attr bucket %d: %w", id, err)
 		}
-		return readAttr(b, &attr)
+		return readNodeEntryToAttr(b, &attr)
 	}); err != nil {
 		return Attr{}, err
 	}
@@ -423,7 +454,7 @@ func (r *reader) GetAttr(id uint32) (attr Attr, _ error) {
 // GetChild returns a child node that has the specified base name.
 func (r *reader) GetChild(pid uint32, base string) (id uint32, attr Attr, _ error) {
 	if err := r.view(func(tx *bolt.Tx) error {
-		metadataEntries, err := getMetadata(tx, r.fsID)
+		metadataEntries, err := getMetadataBucket(tx, r.fsID)
 		if err != nil {
 			return fmt.Errorf("metadata bucket of %q not found for getting child of %d: %w", r.fsID, pid, err)
 		}
@@ -435,7 +466,7 @@ func (r *reader) GetChild(pid uint32, base string) (id uint32, attr Attr, _ erro
 		if err != nil {
 			return fmt.Errorf("failed to read child %q of %d: %w", base, pid, err)
 		}
-		nodes, err := getNodes(tx, r.fsID)
+		nodes, err := getNodesBucket(tx, r.fsID)
 		if err != nil {
 			return fmt.Errorf("nodes bucket of %q not found for getting child of %d: %w", r.fsID, pid, err)
 		}
@@ -443,7 +474,7 @@ func (r *reader) GetChild(pid uint32, base string) (id uint32, attr Attr, _ erro
 		if err != nil {
 			return fmt.Errorf("failed to get child bucket %d: %w", id, err)
 		}
-		return readAttr(child, &attr)
+		return readNodeEntryToAttr(child, &attr)
 	}); err != nil {
 		return 0, Attr{}, err
 	}
@@ -459,7 +490,7 @@ func (r *reader) ForeachChild(id uint32, f func(name string, id uint32, mode os.
 	}
 	children := make(map[string]childInfo)
 	if err := r.view(func(tx *bolt.Tx) error {
-		metadataEntries, err := getMetadata(tx, r.fsID)
+		metadataEntries, err := getMetadataBucket(tx, r.fsID)
 		if err != nil {
 			return fmt.Errorf("nodes bucket of %q not found for getting child of %d: %w", r.fsID, id, err)
 		}
@@ -473,7 +504,7 @@ func (r *reader) ForeachChild(id uint32, f func(name string, id uint32, mode os.
 		if len(firstName) != 0 {
 			firstID := decodeID(md.Get(bucketKeyChildID))
 			if nodes == nil {
-				nodes, err = getNodes(tx, r.fsID)
+				nodes, err = getNodesBucket(tx, r.fsID)
 				if err != nil {
 					return fmt.Errorf("nodes bucket of %q not found for getting children of %d: %w", r.fsID, id, err)
 				}
@@ -491,7 +522,7 @@ func (r *reader) ForeachChild(id uint32, f func(name string, id uint32, mode os.
 			return nil // no child
 		}
 		if nodes == nil {
-			nodes, err = getNodes(tx, r.fsID)
+			nodes, err = getNodesBucket(tx, r.fsID)
 			if err != nil {
 				return fmt.Errorf("nodes bucket of %q not found for getting children of %d: %w", r.fsID, id, err)
 			}
@@ -523,7 +554,7 @@ func (r *reader) OpenFile(id uint32) (File, error) {
 	var mde metadataEntry
 
 	if err := r.view(func(tx *bolt.Tx) error {
-		nodes, err := getNodes(tx, r.fsID)
+		nodes, err := getNodesBucket(tx, r.fsID)
 		if err != nil {
 			return fmt.Errorf("nodes bucket of %q not found for opening %d: %w", r.fsID, id, err)
 		}
@@ -536,7 +567,7 @@ func (r *reader) OpenFile(id uint32) (File, error) {
 		if !os.FileMode(uint32(m)).IsRegular() {
 			return fmt.Errorf("%q is not a regular file", id)
 		}
-		metadataEntries, err := getMetadata(tx, r.fsID)
+		metadataEntries, err := getMetadataBucket(tx, r.fsID)
 		if err != nil {
 			return fmt.Errorf("metadata bucket of %q not found for opening %d: %w", r.fsID, id, err)
 		}
@@ -650,7 +681,7 @@ func parentDir(path string) string {
 
 func (r *reader) NumOfNodes() (i int, _ error) {
 	if err := r.view(func(tx *bolt.Tx) error {
-		nodes, err := getNodes(tx, r.fsID)
+		nodes, err := getNodesBucket(tx, r.fsID)
 		if err != nil {
 			return err
 		}
@@ -660,7 +691,7 @@ func (r *reader) NumOfNodes() (i int, _ error) {
 				return fmt.Errorf("entry bucket for %q not found", string(k))
 			}
 			var attr Attr
-			if err := readAttr(b, &attr); err != nil {
+			if err := readNodeEntryToAttr(b, &attr); err != nil {
 				return err
 			}
 			i++
@@ -670,4 +701,22 @@ func (r *reader) NumOfNodes() (i int, _ error) {
 		return 0, err
 	}
 	return
+}
+
+func chunks[T any](data []T, chunkSize int) [][]T {
+	if len(data) == 0 {
+		return nil
+	}
+	divided := make([][]T, (len(data)+chunkSize-1)/chunkSize)
+	prev := 0
+	i := 0
+	till := len(data) - chunkSize
+	for prev < till {
+		next := prev + chunkSize
+		divided[i] = data[prev:next]
+		prev = next
+		i++
+	}
+	divided[i] = data[prev:]
+	return divided
 }
