@@ -114,7 +114,7 @@ type metadataEntry struct {
 	TarHeaderSize      compression.Offset
 }
 
-func getNodes(tx *bolt.Tx, fsID string) (*bolt.Bucket, error) {
+func getNodesBucket(tx *bolt.Tx, fsID string) (*bolt.Bucket, error) {
 	filesystems := tx.Bucket(bucketKeyFilesystems)
 	if filesystems == nil {
 		return nil, fmt.Errorf("fs %q not found: no fs is registered", fsID)
@@ -130,7 +130,7 @@ func getNodes(tx *bolt.Tx, fsID string) (*bolt.Bucket, error) {
 	return nodes, nil
 }
 
-func getMetadata(tx *bolt.Tx, fsID string) (*bolt.Bucket, error) {
+func getMetadataBucket(tx *bolt.Tx, fsID string) (*bolt.Bucket, error) {
 	filesystems := tx.Bucket(bucketKeyFilesystems)
 	if filesystems == nil {
 		return nil, fmt.Errorf("fs %q not found: no fs is registered", fsID)
@@ -162,8 +162,8 @@ func getMetadataBucketByID(md *bolt.Bucket, id uint32) (*bolt.Bucket, error) {
 	return b, nil
 }
 
-// writeAttr writes node metadata to the appropriate node bucket.
-func writeAttr(b *bolt.Bucket, attr *Attr) error {
+// writeNodeEntry writes node metadata to the appropriate node bucket.
+func writeNodeEntry(b *bolt.Bucket, attr *Attr) error {
 	if attr.DevMajor != 0 {
 		putInt(b, bucketKeyDevMajor, int64(attr.DevMajor))
 	}
@@ -245,7 +245,7 @@ func writeAttr(b *bolt.Bucket, attr *Attr) error {
 	return nil
 }
 
-func readAttr(b *bolt.Bucket, attr *Attr) error {
+func readNodeEntryToAttr(b *bolt.Bucket, attr *Attr) error {
 	return b.ForEach(func(k, v []byte) error {
 		switch string(k) {
 		case string(bucketKeySize):
@@ -324,9 +324,10 @@ func writeMetadataEntry(md *bolt.Bucket, m *metadataEntry) error {
 			break
 		}
 		if len(m.children) > 1 {
+			// TODO: We should also sort the children by base name.
 			var cbkt *bolt.Bucket
 			for k, c := range m.children {
-				if k == firstChildName {
+				if k == firstChildName || k == "" {
 					continue
 				}
 				if cbkt == nil {

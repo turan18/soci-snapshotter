@@ -34,6 +34,7 @@ package metadata
 
 import (
 	"compress/gzip"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -196,7 +197,6 @@ func TestMetadataReader(t *testing.T) {
 		}
 	}
 }
-
 func BenchmarkMetadataReader(b *testing.B) {
 
 	newTempDB := func() (*bbolt.DB, func(), error) {
@@ -217,7 +217,8 @@ func BenchmarkMetadataReader(b *testing.B) {
 	generateTOC := func(numEntries int) (ztoc.TOC, error) {
 		tarEntries := testutil.GenerateFileTarEntries(numEntries)
 		ztoc, _, err := ztoc.BuildZtocReader(nil, tarEntries, gzip.DefaultCompression, 4<<20)
-		return ztoc.TOC, err
+		temp := *ztoc
+		return temp.TOC, err
 	}
 
 	tempDB, clean, err := newTempDB()
@@ -238,14 +239,14 @@ func BenchmarkMetadataReader(b *testing.B) {
 		// 	name:    "Create metadata.Reader with a good amount TOC entries",
 		// 	entries: 10_000,
 		// },
-		{
-			name:    "Create metadata.Reader with many TOC entries",
-			entries: 50_000,
-		},
 		// {
-		// 	name:    "Create metadata.Reader with an enormous amount of TOC entries",
-		// 	entries: 100_000,
+		// 	name:    "Create metadata.Reader with many TOC entries",
+		// 	entries: 50_000,
 		// },
+		{
+			name:    "Create metadata.Reader with an enormous amount of TOC entries",
+			entries: 100_000,
+		},
 	}
 	for _, tc := range testCases {
 		toc, err := generateTOC(tc.entries)
@@ -254,6 +255,7 @@ func BenchmarkMetadataReader(b *testing.B) {
 		}
 		b.Run(tc.name, func(b *testing.B) {
 			_, err := NewReader(tempDB, nil, toc)
+			fmt.Fprintf(os.Stderr, "DONE\n")
 			if err != nil {
 				b.Fatalf("failed to create new reader: %v", err)
 			}
