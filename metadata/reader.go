@@ -34,7 +34,6 @@ package metadata
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -156,18 +155,20 @@ func (r *reader) initRootNode(fsID string) error {
 		if err != nil {
 			return err
 		}
+		// Generate a new node ID.
 		rootID, err := r.nextID()
 		if err != nil {
 			return err
 		}
-		rootBucket, err := nodes.CreateBucket(encodeID(rootID))
-		if err != nil {
-			return err
-		}
-		if err := writeNodeEntry(rootBucket, &Attr{
+		// rootBucket, err := nodes.CreateBucket(encodeID(rootID))
+		// if err != nil {
+		// 	return err
+		// }
+		err = writeNodeEntry(nodes, encodeID(rootID), &Attr{
 			Mode:    os.ModeDir | 0755,
 			NumLink: 2, // The directory itself(.) and the parent link to this directory.
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
 		r.rootID = rootID
@@ -176,7 +177,7 @@ func (r *reader) initRootNode(fsID string) error {
 }
 
 func (r *reader) initNodes(toc ztoc.TOC) error {
-	const chunkSize = 1000
+	const chunkSize = 1_000
 
 	md := make(map[uint32]*metadataEntry)
 	fileMdChunks := chunks(toc.FileMetadata, chunkSize)
@@ -217,12 +218,12 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 					if err != nil {
 						return fmt.Errorf("%q is a hardlink but cannot get link destination %q: %w", ent.Name, ent.Linkname, err)
 					}
-					b, err = getNodeBucketByID(nodes, id)
+					attr, err := getNodeByID(nodes, id)
 					if err != nil {
 						return fmt.Errorf("cannot get hardlink destination %q ==> %q (%d): %w", ent.Name, ent.Linkname, id, err)
 					}
-					numLink, _ := binary.Varint(b.Get(bucketKeyNumLink))
-					if err := putInt(b, bucketKeyNumLink, numLink+1); err != nil {
+					attr.NumLink = attr.NumLink + 1
+					if err := writeNodeEntry(b, encodeID(id), attr); err != nil {
 						return fmt.Errorf("cannot put NumLink of %q ==> %q: %w", ent.Name, ent.Linkname, err)
 					}
 				} else {
@@ -232,31 +233,32 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 						// Check if this directory is already created, if so overwrite it.
 						id, err = getIDByName(md, cleanName, r.rootID)
 						if err == nil {
-							b, err = getNodeBucketByID(nodes, id)
+							attr, err := getNodeByID(nodes, id)
 							if err != nil {
-								return fmt.Errorf("failed to get directory bucket %d: %w", id, err)
+								return fmt.Errorf("failed to get directory node %d: %w", id, err)
 							}
 							found = true
 							attr.NumLink = readNumLink(b)
 						}
 					}
+					// No existing node. Create a new one.
 					if !found {
-						// No existing node. Create a new one.
+						// Generate a new node ID.
 						id, err = r.nextID()
 						if err != nil {
 							return err
 						}
-						b, err = nodes.CreateBucket(encodeID(id))
-						if err != nil {
-							return err
-						}
+						// b, err = nodes.CreateBucket(encodeID(id))
+						// if err != nil {
+						// 	return err
+						// }
 						attr.NumLink = 1 // at least the parent dir references this directory.
 						if isDir {
 							attr.NumLink++ // at least "." references this directory.
 						}
 					}
 					// Write the new node object to the node bucket.
-					if err := writeNodeEntry(b, attrFromZtocEntry(&ent, &attr)); err != nil {
+					if err := writeNodeEntry(nodes, encodeID(id), attrFromZtocEntry(&ent, &attr)); err != nil {
 						return fmt.Errorf("failed to set attr to %d(%q): %w", id, ent.Name, err)
 					}
 				}
@@ -267,7 +269,7 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 				if err != nil {
 					return fmt.Errorf("failed to create parent directory %q of %q: %w", parentDirectoryName, ent.Name, err)
 				}
-				if err := setChild(md, parentBucket, parentID, filepath.Base(cleanName), id, isDir); err != nil {
+				if err := setChild(md, nodes, parentBucket, parentID, filepath.Base(cleanName), id, isDir); err != nil {
 					return err
 				}
 
@@ -343,29 +345,29 @@ func (r *reader) initNodes(toc ztoc.TOC) error {
 // one and adds itself to the children map of its parent. If the parent has not yet been created,
 // it recurses the path until it finds a parent that exists, creating parent->child relationships
 // along the way.
-func (r *reader) getOrCreateDir(nodes *bolt.Bucket, md map[uint32]*metadataEntry, dir string, rootID uint32) (id uint32, b *bolt.Bucket, err error) {
+func (r *reader) getOrCreateDir(nodes *bolt.Bucket, md map[uint32]*metadataEntry, dir string, rootID uint32) (id uint32, a *Attr, err error) {
 	id, err = getIDByName(md, dir, rootID)
-	// Directory exists, return the node ID and bucket
+	// Directory exists, return the node ID and Attr
 	if err == nil {
-		b, err = getNodeBucketByID(nodes, id)
+		attr, err := getNodeByID(nodes, id)
 		if err != nil {
 			return 0, nil, fmt.Errorf("failed to get dir bucket %d: %w", id, err)
 		}
-		return id, b, nil
+		return id, attr, nil
 	}
 	id, err = r.nextID()
 	if err != nil {
 		return 0, nil, err
 	}
-	b, err = nodes.CreateBucket(encodeID(id))
-	if err != nil {
-		return 0, nil, err
-	}
+	// b, err = nodes.CreateBucket(encodeID(id))
+	// if err != nil {
+	// 	return 0, nil, err
+	// }
 	attr := &Attr{
 		Mode:    os.ModeDir | 0755,
 		NumLink: 2, // The directory itself(.) and the parent link to this directory.
 	}
-	if err := writeNodeEntry(b, attr); err != nil {
+	if err := writeNodeEntry(nodes, encodeID(id), attr); err != nil {
 		return 0, nil, err
 	}
 
@@ -373,10 +375,10 @@ func (r *reader) getOrCreateDir(nodes *bolt.Bucket, md map[uint32]*metadataEntry
 	if err != nil {
 		return 0, nil, err
 	}
-	if err := setChild(md, parentBucket, parentID, filepath.Base(dir), id, true); err != nil {
+	if err := setChild(md, nodes, parentBucket, parentID, filepath.Base(dir), id, true); err != nil {
 		return 0, nil, err
 	}
-	return id, b, nil
+	return id, attr, nil
 }
 
 func (r *reader) waitInit() error {
@@ -419,166 +421,167 @@ func (r *reader) Close() error {
 
 // GetAttr returns file attribute of specified node.
 func (r *reader) GetAttr(id uint32) (attr Attr, _ error) {
-	if r.rootID == id { // no need to wait for root dir
-		if err := r.db.View(func(tx *bolt.Tx) error {
-			nodes, err := getNodesBucket(tx, r.fsID)
-			if err != nil {
-				return fmt.Errorf("nodes bucket of %q not found for sarching attr %d: %w", r.fsID, id, err)
-			}
-			b, err := getNodeBucketByID(nodes, id)
-			if err != nil {
-				return fmt.Errorf("failed to get attr bucket %d: %w", id, err)
-			}
-			return readNodeEntryToAttr(b, &attr)
-		}); err != nil {
-			return Attr{}, err
-		}
-		return attr, nil
-	}
-	if err := r.view(func(tx *bolt.Tx) error {
-		nodes, err := getNodesBucket(tx, r.fsID)
-		if err != nil {
-			return fmt.Errorf("nodes bucket of %q not found for sarching attr %d: %w", r.fsID, id, err)
-		}
-		b, err := getNodeBucketByID(nodes, id)
-		if err != nil {
-			return fmt.Errorf("failed to get attr bucket %d: %w", id, err)
-		}
-		return readNodeEntryToAttr(b, &attr)
-	}); err != nil {
-		return Attr{}, err
-	}
+	// if r.rootID == id { // no need to wait for root dir
+	// 	if err := r.db.View(func(tx *bolt.Tx) error {
+	// 		nodes, err := getNodesBucket(tx, r.fsID)
+	// 		if err != nil {
+	// 			return fmt.Errorf("nodes bucket of %q not found for sarching attr %d: %w", r.fsID, id, err)
+	// 		}
+	// 		b, err := getNodeBucketByID(nodes, id)
+	// 		if err != nil {
+	// 			return fmt.Errorf("failed to get attr bucket %d: %w", id, err)
+	// 		}
+	// 		return readNodeEntryToAttr(b, &attr)
+	// 	}); err != nil {
+	// 		return Attr{}, err
+	// 	}
+	// 	return attr, nil
+	// }
+	// if err := r.view(func(tx *bolt.Tx) error {
+	// 	nodes, err := getNodesBucket(tx, r.fsID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("nodes bucket of %q not found for sarching attr %d: %w", r.fsID, id, err)
+	// 	}
+	// 	b, err := getNodeBucketByID(nodes, id)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to get attr bucket %d: %w", id, err)
+	// 	}
+	// 	return readNodeEntryToAttr(b, &attr)
+	// }); err != nil {
+	// 	return Attr{}, err
+	// }
 	return
 }
 
 // GetChild returns a child node that has the specified base name.
 func (r *reader) GetChild(pid uint32, base string) (id uint32, attr Attr, _ error) {
-	if err := r.view(func(tx *bolt.Tx) error {
-		metadataEntries, err := getMetadataBucket(tx, r.fsID)
-		if err != nil {
-			return fmt.Errorf("metadata bucket of %q not found for getting child of %d: %w", r.fsID, pid, err)
-		}
-		md, err := getMetadataBucketByID(metadataEntries, pid)
-		if err != nil {
-			return fmt.Errorf("failed to get parent metadata %d: %w", pid, err)
-		}
-		id, err = readChild(md, base)
-		if err != nil {
-			return fmt.Errorf("failed to read child %q of %d: %w", base, pid, err)
-		}
-		nodes, err := getNodesBucket(tx, r.fsID)
-		if err != nil {
-			return fmt.Errorf("nodes bucket of %q not found for getting child of %d: %w", r.fsID, pid, err)
-		}
-		child, err := getNodeBucketByID(nodes, id)
-		if err != nil {
-			return fmt.Errorf("failed to get child bucket %d: %w", id, err)
-		}
-		return readNodeEntryToAttr(child, &attr)
-	}); err != nil {
-		return 0, Attr{}, err
-	}
+	// if err := r.view(func(tx *bolt.Tx) error {
+	// 	metadataEntries, err := getMetadataBucket(tx, r.fsID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("metadata bucket of %q not found for getting child of %d: %w", r.fsID, pid, err)
+	// 	}
+	// 	md, err := getMetadataBucketByID(metadataEntries, pid)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to get parent metadata %d: %w", pid, err)
+	// 	}
+	// 	id, err = readChild(md, base)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to read child %q of %d: %w", base, pid, err)
+	// 	}
+	// 	nodes, err := getNodesBucket(tx, r.fsID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("nodes bucket of %q not found for getting child of %d: %w", r.fsID, pid, err)
+	// 	}
+	// 	child, err := getNodeBucketByID(nodes, id)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to get child bucket %d: %w", id, err)
+	// 	}
+	// 	return readNodeEntryToAttr(child, &attr)
+	// }); err != nil {
+	// 	return 0, Attr{}, err
+	// }
 	return
 }
 
 // ForeachChild calls the specified callback function for each child node.
 // When the callback returns non-nil error, this stops the iteration.
 func (r *reader) ForeachChild(id uint32, f func(name string, id uint32, mode os.FileMode) bool) error {
-	type childInfo struct {
-		id   uint32
-		mode os.FileMode
-	}
-	children := make(map[string]childInfo)
-	if err := r.view(func(tx *bolt.Tx) error {
-		metadataEntries, err := getMetadataBucket(tx, r.fsID)
-		if err != nil {
-			return fmt.Errorf("nodes bucket of %q not found for getting child of %d: %w", r.fsID, id, err)
-		}
-		md, err := getMetadataBucketByID(metadataEntries, id)
-		if err != nil {
-			return nil // no child
-		}
+	// type childInfo struct {
+	// 	id   uint32
+	// 	mode os.FileMode
+	// }
+	// children := make(map[string]childInfo)
+	// if err := r.view(func(tx *bolt.Tx) error {
+	// 	metadataEntries, err := getMetadataBucket(tx, r.fsID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("nodes bucket of %q not found for getting child of %d: %w", r.fsID, id, err)
+	// 	}
+	// 	md, err := getMetadataBucketByID(metadataEntries, id)
+	// 	if err != nil {
+	// 		return nil // no child
+	// 	}
 
-		var nodes *bolt.Bucket
-		firstName := md.Get(bucketKeyChildName)
-		if len(firstName) != 0 {
-			firstID := decodeID(md.Get(bucketKeyChildID))
-			if nodes == nil {
-				nodes, err = getNodesBucket(tx, r.fsID)
-				if err != nil {
-					return fmt.Errorf("nodes bucket of %q not found for getting children of %d: %w", r.fsID, id, err)
-				}
-			}
-			firstChild, err := getNodeBucketByID(nodes, firstID)
-			if err != nil {
-				return fmt.Errorf("failed to get first child bucket %d: %w", firstID, err)
-			}
-			mode, _ := binary.Uvarint(firstChild.Get(bucketKeyMode))
-			children[string(firstName)] = childInfo{firstID, os.FileMode(uint32(mode))}
-		}
+	// 	var nodes *bolt.Bucket
+	// 	firstName := md.Get(bucketKeyChildName)
+	// 	if len(firstName) != 0 {
+	// 		firstID := decodeID(md.Get(bucketKeyChildID))
+	// 		if nodes == nil {
+	// 			nodes, err = getNodesBucket(tx, r.fsID)
+	// 			if err != nil {
+	// 				return fmt.Errorf("nodes bucket of %q not found for getting children of %d: %w", r.fsID, id, err)
+	// 			}
+	// 		}
+	// 		firstChild, err := getNodeBucketByID(nodes, firstID)
+	// 		if err != nil {
+	// 			return fmt.Errorf("failed to get first child bucket %d: %w", firstID, err)
+	// 		}
+	// 		mode, _ := binary.Uvarint(firstChild.Get(bucketKeyMode))
+	// 		children[string(firstName)] = childInfo{firstID, os.FileMode(uint32(mode))}
+	// 	}
 
-		cbkt := md.Bucket(bucketKeyChildrenExtra)
-		if cbkt == nil {
-			return nil // no child
-		}
-		if nodes == nil {
-			nodes, err = getNodesBucket(tx, r.fsID)
-			if err != nil {
-				return fmt.Errorf("nodes bucket of %q not found for getting children of %d: %w", r.fsID, id, err)
-			}
-		}
-		return cbkt.ForEach(func(k, v []byte) error {
-			id := decodeID(v)
-			child, err := getNodeBucketByID(nodes, id)
-			if err != nil {
-				return fmt.Errorf("failed to get child bucket %d: %w", id, err)
-			}
-			mode, _ := binary.Uvarint(child.Get(bucketKeyMode))
-			children[string(k)] = childInfo{id, os.FileMode(uint32(mode))}
-			return nil
-		})
-	}); err != nil {
-		return err
-	}
-	for k, e := range children {
-		if !f(k, e.id, e.mode) {
-			break
-		}
-	}
+	// 	cbkt := md.Bucket(bucketKeyChildrenExtra)
+	// 	if cbkt == nil {
+	// 		return nil // no child
+	// 	}
+	// 	if nodes == nil {
+	// 		nodes, err = getNodesBucket(tx, r.fsID)
+	// 		if err != nil {
+	// 			return fmt.Errorf("nodes bucket of %q not found for getting children of %d: %w", r.fsID, id, err)
+	// 		}
+	// 	}
+	// 	return cbkt.ForEach(func(k, v []byte) error {
+	// 		id := decodeID(v)
+	// 		child, err := getNodeBucketByID(nodes, id)
+	// 		if err != nil {
+	// 			return fmt.Errorf("failed to get child bucket %d: %w", id, err)
+	// 		}
+	// 		mode, _ := binary.Uvarint(child.Get(bucketKeyMode))
+	// 		children[string(k)] = childInfo{id, os.FileMode(uint32(mode))}
+	// 		return nil
+	// 	})
+	// }); err != nil {
+	// 	return err
+	// }
+	// for k, e := range children {
+	// 	if !f(k, e.id, e.mode) {
+	// 		break
+	// 	}
+	// }
 	return nil
 }
 
 // OpenFile returns a section reader of the specified node.
 func (r *reader) OpenFile(id uint32) (File, error) {
-	var size int64
-	var mde metadataEntry
+	// var size int64
+	// var mde metadataEntry
 
-	if err := r.view(func(tx *bolt.Tx) error {
-		nodes, err := getNodesBucket(tx, r.fsID)
-		if err != nil {
-			return fmt.Errorf("nodes bucket of %q not found for opening %d: %w", r.fsID, id, err)
-		}
-		b, err := getNodeBucketByID(nodes, id)
-		if err != nil {
-			return fmt.Errorf("failed to get file bucket %d: %w", id, err)
-		}
-		size, _ = binary.Varint(b.Get(bucketKeySize))
-		m, _ := binary.Uvarint(b.Get(bucketKeyMode))
-		if !os.FileMode(uint32(m)).IsRegular() {
-			return fmt.Errorf("%q is not a regular file", id)
-		}
-		metadataEntries, err := getMetadataBucket(tx, r.fsID)
-		if err != nil {
-			return fmt.Errorf("metadata bucket of %q not found for opening %d: %w", r.fsID, id, err)
-		}
-		if md, err := getMetadataBucketByID(metadataEntries, id); err == nil {
-			mde = getMetadataEntry(md)
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return &file{mde.TarName, mde.UncompressedOffset, compression.Offset(size), mde.TarHeaderOffset, mde.TarHeaderSize}, nil
+	// if err := r.view(func(tx *bolt.Tx) error {
+	// 	nodes, err := getNodesBucket(tx, r.fsID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("nodes bucket of %q not found for opening %d: %w", r.fsID, id, err)
+	// 	}
+	// 	b, err := getNodeBucketByID(nodes, id)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to get file bucket %d: %w", id, err)
+	// 	}
+	// 	size, _ = binary.Varint(b.Get(bucketKeySize))
+	// 	m, _ := binary.Uvarint(b.Get(bucketKeyMode))
+	// 	if !os.FileMode(uint32(m)).IsRegular() {
+	// 		return fmt.Errorf("%q is not a regular file", id)
+	// 	}
+	// 	metadataEntries, err := getMetadataBucket(tx, r.fsID)
+	// 	if err != nil {
+	// 		return fmt.Errorf("metadata bucket of %q not found for opening %d: %w", r.fsID, id, err)
+	// 	}
+	// 	if md, err := getMetadataBucketByID(metadataEntries, id); err == nil {
+	// 		mde = getMetadataEntry(md)
+	// 	}
+	// 	return nil
+	// }); err != nil {
+	// 	return nil, err
+	// }
+	// return &file{mde.TarName, mde.UncompressedOffset, compression.Offset(size), mde.TarHeaderOffset, mde.TarHeaderSize}, nil
+	return &file{}, nil
 }
 
 type file struct {
@@ -651,7 +654,7 @@ func getIDByName(md map[uint32]*metadataEntry, path string, rootID uint32) (uint
 
 // setChild adds a child identified by base name to its parents children map as well
 // as incrementing the link count of the parent if the child is a directory.
-func setChild(md map[uint32]*metadataEntry, parentBucket *bolt.Bucket, parentID uint32, base string, id uint32, isDir bool) error {
+func setChild(md map[uint32]*metadataEntry, nodes *bolt.Bucket, parentAttr *Attr, parentID uint32, base string, id uint32, isDir bool) error {
 	if md[parentID] == nil {
 		md[parentID] = &metadataEntry{}
 	}
@@ -660,8 +663,10 @@ func setChild(md map[uint32]*metadataEntry, parentBucket *bolt.Bucket, parentID 
 	}
 	md[parentID].children[base] = childEntry{base, id}
 	if isDir {
-		numLink, _ := binary.Varint(parentBucket.Get(bucketKeyNumLink))
-		if err := putInt(parentBucket, bucketKeyNumLink, numLink+1); err != nil {
+		// Decode the node, update the numlink, re-encode and put.
+		parentAttr.NumLink = parentAttr.NumLink + 1
+		// numLink, _ := binary.Varint(parentBucket.Get(bucketKeyNumLink))
+		if err := writeNodeEntry(nodes, encodeID(parentID), parentAttr); err != nil {
 			return fmt.Errorf("cannot add numlink for children: %w", err)
 		}
 	}

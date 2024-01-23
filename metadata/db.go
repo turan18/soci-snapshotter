@@ -33,7 +33,9 @@
 package metadata
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
 	"os"
 
@@ -146,12 +148,15 @@ func getMetadataBucket(tx *bolt.Tx, fsID string) (*bolt.Bucket, error) {
 	return md, nil
 }
 
-func getNodeBucketByID(nodes *bolt.Bucket, id uint32) (*bolt.Bucket, error) {
-	b := nodes.Bucket(encodeID(id))
-	if b == nil {
-		return nil, fmt.Errorf("node bucket for %d not found", id)
+func getNodeByID(nodes *bolt.Bucket, id uint32) (*Attr, error) {
+	val := nodes.Get(encodeID(id))
+	if val == nil {
+		return nil, fmt.Errorf("node key with ID: %d not found", id)
 	}
-	return b, nil
+	var a *Attr
+	b := bytes.NewBuffer([]byte{})
+	gob.NewDecoder(b).Decode(a)
+	return a, nil
 }
 
 func getMetadataBucketByID(md *bolt.Bucket, id uint32) (*bolt.Bucket, error) {
@@ -163,85 +168,96 @@ func getMetadataBucketByID(md *bolt.Bucket, id uint32) (*bolt.Bucket, error) {
 }
 
 // writeNodeEntry writes node metadata to the appropriate node bucket.
-func writeNodeEntry(b *bolt.Bucket, attr *Attr) error {
-	if attr.DevMajor != 0 {
-		putInt(b, bucketKeyDevMajor, int64(attr.DevMajor))
+func writeNodeEntry(b *bolt.Bucket, nodeIDKey []byte, attr *Attr) error {
+	// Can we encode Attr and write just that?
+	buf := bytes.NewBuffer([]byte{})
+	enc := gob.NewEncoder(buf)
+	err := enc.Encode(attr)
+	if err != nil {
+		return err
 	}
-	if attr.DevMinor != 0 {
-		putInt(b, bucketKeyDevMinor, int64(attr.DevMinor))
+	err = b.Put(nodeIDKey, buf.Bytes())
+	if err != nil {
+		return err
 	}
-	if attr.GID != 0 {
-		putInt(b, bucketKeyGID, int64(attr.GID))
-	}
-	if len(attr.LinkName) > 0 {
-		if err := b.Put(bucketKeyLinkName, []byte(attr.LinkName)); err != nil {
-			return err
-		}
-	}
-	if attr.Mode != 0 {
-		val, err := encodeUint(uint64(attr.Mode))
-		if err != nil {
-			return err
-		}
-		if err := b.Put(bucketKeyMode, val); err != nil {
-			return err
-		}
-	}
-	if !attr.ModTime.IsZero() {
-		te, err := attr.ModTime.GobEncode()
-		if err != nil {
-			return err
-		}
-		if err := b.Put(bucketKeyModTime, te); err != nil {
-			return err
-		}
-	}
-	if attr.NumLink != 0 {
-		putInt(b, bucketKeyNumLink, int64(attr.NumLink-1)) // numLink = 0 means num link = 1 in DB
-	}
-	if attr.Size != 0 {
-		putInt(b, bucketKeySize, int64(attr.Size))
-	}
-	if attr.UID != 0 {
-		putInt(b, bucketKeyUID, int64(attr.UID))
-	}
-	if len(attr.Xattrs) > 0 {
-		var firstK string
-		var firstV []byte
-		for k, v := range attr.Xattrs {
-			firstK, firstV = k, v
-			break
-		}
-		var xbkt *bolt.Bucket
-		for k, v := range attr.Xattrs {
-			if k == firstK || len(v) == 0 {
-				continue
-			}
-			if xbkt == nil {
-				if xbkt := b.Bucket(bucketKeyXattrsExtra); xbkt != nil {
-					// Reset
-					if err := b.DeleteBucket(bucketKeyXattrsExtra); err != nil {
-						return err
-					}
-				}
-				var err error
-				xbkt, err = b.CreateBucket(bucketKeyXattrsExtra)
-				if err != nil {
-					return err
-				}
-			}
-			if err := xbkt.Put([]byte(k), v); err != nil {
-				return fmt.Errorf("failed to set xattr %q=%q: %w", k, string(v), err)
-			}
-		}
-		if err := b.Put(bucketKeyXattrKey, []byte(firstK)); err != nil {
-			return err
-		}
-		if err := b.Put(bucketKeyXattrValue, firstV); err != nil {
-			return err
-		}
+	// if attr.DevMajor != 0 {
+	// 	putInt(b, bucketKeyDevMajor, int64(attr.DevMajor))
+	// }
+	// if attr.DevMinor != 0 {
+	// 	putInt(b, bucketKeyDevMinor, int64(attr.DevMinor))
+	// }
+	// if attr.GID != 0 {
+	// 	putInt(b, bucketKeyGID, int64(attr.GID))
+	// }
+	// if len(attr.LinkName) > 0 {
+	// 	if err := b.Put(bucketKeyLinkName, []byte(attr.LinkName)); err != nil {
+	// 		return err
+	// 	}
+	// }
+	// if attr.Mode != 0 {
+	// 	val, err := encodeUint(uint64(attr.Mode))
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	if err := b.Put(bucketKeyMode, val); err != nil {
+	// 		return err
+	// 	}
+	// }
+	// if !attr.ModTime.IsZero() {
+	// 	te, err := attr.ModTime.GobEncode()
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	if err := b.Put(bucketKeyModTime, te); err != nil {
+	// 		return err
+	// 	}
+	// }
+	// if attr.NumLink != 0 {
+	// 	putInt(b, bucketKeyNumLink, int64(attr.NumLink-1)) // numLink = 0 means num link = 1 in DB
+	// }
+	// if attr.Size != 0 {
+	// 	putInt(b, bucketKeySize, int64(attr.Size))
+	// }
+	// if attr.UID != 0 {
+	// 	putInt(b, bucketKeyUID, int64(attr.UID))
+	// }
+	// if len(attr.Xattrs) > 0 {
+	// 	var firstK string
+	// 	var firstV []byte
+	// 	for k, v := range attr.Xattrs {
+	// 		firstK, firstV = k, v
+	// 		break
+	// 	}
+	// 	var xbkt *bolt.Bucket
+	// 	for k, v := range attr.Xattrs {
+	// 		if k == firstK || len(v) == 0 {
+	// 			continue
+	// 		}
+	// 		if xbkt == nil {
+	// 			if xbkt := b.Bucket(bucketKeyXattrsExtra); xbkt != nil {
+	// 				// Reset
+	// 				if err := b.DeleteBucket(bucketKeyXattrsExtra); err != nil {
+	// 					return err
+	// 				}
+	// 			}
+	// 			var err error
+	// 			xbkt, err = b.CreateBucket(bucketKeyXattrsExtra)
+	// 			if err != nil {
+	// 				return err
+	// 			}
+	// 		}
+	// 		if err := xbkt.Put([]byte(k), v); err != nil {
+	// 			return fmt.Errorf("failed to set xattr %q=%q: %w", k, string(v), err)
+	// 		}
+	// 	}
+	// 	if err := b.Put(bucketKeyXattrKey, []byte(firstK)); err != nil {
+	// 		return err
+	// 	}
+	// 	if err := b.Put(bucketKeyXattrValue, firstV); err != nil {
+	// 		return err
+	// 	}
 
-	}
+	// }
 	return nil
 }
 
