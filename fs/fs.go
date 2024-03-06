@@ -467,6 +467,7 @@ func (fs *filesystem) Mount(ctx context.Context, mountpoint string, labels map[s
 	if !ok {
 		return fmt.Errorf("unable to get image ref from labels")
 	}
+
 	imgDigest, ok := labels[ctdsnapshotters.TargetManifestDigestLabel]
 	if !ok {
 		return fmt.Errorf("unable to get image digest from labels")

@@ -38,6 +38,7 @@ import (
 
 	"github.com/awslabs/soci-snapshotter/cmd/soci/commands"
 	"github.com/awslabs/soci-snapshotter/cmd/soci/commands/index"
+	"github.com/awslabs/soci-snapshotter/cmd/soci/commands/lod"
 	"github.com/awslabs/soci-snapshotter/cmd/soci/commands/ztoc"
 	"github.com/awslabs/soci-snapshotter/config"
 	"github.com/awslabs/soci-snapshotter/version"
@@ -90,6 +91,7 @@ func main() {
 	app.Commands = []cli.Command{
 		index.Command,
 		ztoc.Command,
+		lod.Command,
 		commands.CreateCommand,
 		commands.PushCommand,
 		commands.RebuildDBCommand,
