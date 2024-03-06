@@ -28,7 +28,9 @@ import (
 	commonmetrics "github.com/awslabs/soci-snapshotter/fs/metrics/common"
 	"github.com/awslabs/soci-snapshotter/ztoc"
 	"github.com/awslabs/soci-snapshotter/ztoc/compression"
+	"github.com/containerd/log"
 	"github.com/opencontainers/go-digest"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -292,6 +294,11 @@ func (m *SpanManager) getSpanContent(spanID compression.SpanID, offsetStart, off
 		}
 		return io.NopCloser(bytes.NewReader(uncompSpanBuf[offsetStart : offsetStart+size])), nil
 	}
+
+	log.G(context.Background()).WithFields(logrus.Fields{
+		"layer":  m.layerDigest,
+		"spanId": spanID,
+	}).Debug("synchronously fetching span")
 
 	// The synchronously requested span content is unavailable locally and so we
 	// must fetch it over the network. Increment the synchronous remote fetch
